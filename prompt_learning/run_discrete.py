@@ -166,7 +166,7 @@ class Metrics:
 
             return "".join(ret)
 
-        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents = [], [], [], [], [], [], []
+        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents = [], [], [], [], [], [], [], []
         for s, t, p in zip(src_sents, trg_sents, prd_sents):
             # For positive examples
             if s != t:
@@ -175,6 +175,8 @@ class Metrics:
                     tp_sents.append(difference(s, t))
                 if p == s:
                     fn_sents.append(difference(s, t))
+                if (p!=t and p!=s):
+                    wp_sents.append(difference(s,t))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
@@ -191,20 +193,20 @@ class Metrics:
         f1 = 2.0 * (p * r) / (p + r + 1e-12)
         fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
 
-        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents
+        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 
 def main():
     parser = argparse.ArgumentParser()
 
     # Data config.
-    parser.add_argument("--data_dir", type=str, default="../../data/csc/",
+    parser.add_argument("--data_dir", type=str, default="data/",
                         help="Directory to contain the input data for all tasks.")
     parser.add_argument("--task_name", type=str, default="SIGHAN",
                         help="Name of the training task.")
     parser.add_argument("--load_model_path", type=str, default="bert-base-chinese",
                         help="Pre-trained model path to load if needed.")
-    parser.add_argument("--cache_dir", type=str, default="../../cache/",
+    parser.add_argument("--cache_dir", type=str, default="../cache/",
                         help="Directory to store the pre-trained language models downloaded from s3.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
@@ -370,7 +372,7 @@ def main():
         best_result = list()
         wrap = False
         progress_bar = tqdm(range(args.max_train_steps))
-        for _ in progress_bar:
+        for _ in range(int(args.num_train_epochs)):
             train_loss = 0
             num_train_examples = 0
             if wrap: break
@@ -426,7 +428,7 @@ def main():
                     eval_loss = 0
                     eval_steps = 0
                     all_inputs, all_labels, all_predictions = [], [], []
-                    for batch in eval_dataloader:
+                    for batch in tqdm(eval_dataloader,desc="Evaluation"):
                         batch = tuple(t.to(device) for t in batch)
                         src_ids, attention_mask, trg_ids = batch
                         with torch.no_grad():
@@ -466,7 +468,7 @@ def main():
     
                     loss = train_loss / global_step
                     eval_loss = eval_loss / eval_steps
-                    p, r, f1, fpr, tp, fp, fn = Metrics.compute(all_inputs, all_labels, all_predictions)
+                    p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
     
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
                     with open(output_tp_file, "w") as writer:
@@ -479,6 +481,10 @@ def main():
                     output_fn_file = os.path.join(args.output_dir, "sents.fn")
                     with open(output_fn_file, "w") as writer:
                         for line in fn:
+                            writer.write(line + "\n")
+                    output_wp_file = os.path.join(args.output_dir, "sents.wp")
+                    with open(output_wp_file, "w") as writer:
+                        for line in wp:
                             writer.write(line + "\n")
 
                     result = {
@@ -570,7 +576,7 @@ def main():
             eval_steps += 1
 
         eval_loss = eval_loss / eval_steps
-        p, r, f1, fpr, tp, fp, fn = Metrics.compute(all_inputs, all_labels, all_predictions)
+        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
@@ -583,6 +589,10 @@ def main():
         output_fn_file = os.path.join(args.output_dir, "sents.fn")
         with open(output_fn_file, "w") as writer:
             for line in fn:
+                writer.write(line + "\n")
+        output_wp_file = os.path.join(args.output_dir, "sents.wp")
+        with open(output_wp_file, "w") as writer:
+            for line in wp:
                 writer.write(line + "\n")
 
         result = {

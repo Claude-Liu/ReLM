@@ -215,7 +215,7 @@ class Metrics:
 
             return "".join(ret)
 
-        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents = [], [], [], [], [], [], []
+        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents = [], [], [], [], [], [], [], []
         for s, t, p in zip(src_sents, trg_sents, prd_sents):
             # For positive examples
             if s != t:
@@ -224,6 +224,8 @@ class Metrics:
                     tp_sents.append(difference(s, t))
                 if p == s:
                     fn_sents.append(difference(s, t))
+                if (p!=t and p!=s):
+                    wp_sents.append(difference(s,t))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
@@ -240,7 +242,7 @@ class Metrics:
         f1 = 2.0 * (p * r) / (p + r + 1e-12)
         fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
 
-        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents
+        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 
 def mask_tokens(inputs, tokenizer, noise_probability=0.2):
@@ -515,7 +517,7 @@ def main():
     
                     loss = train_loss / global_step
                     eval_loss = eval_loss / eval_steps
-                    p, r, f1, fpr, tp, fp, fn = Metrics.compute(all_inputs, all_labels, all_predictions)
+                    p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
     
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
                     with open(output_tp_file, "w") as writer:
@@ -529,7 +531,10 @@ def main():
                     with open(output_fn_file, "w") as writer:
                         for line in fn:
                             writer.write(line + "\n")
-
+                    output_wp_file = os.path.join(args.output_dir, "sents.wp")
+                    with open(output_wp_file, "w") as writer:
+                        for line in wp:
+                            writer.write(line + "\n")
                     result = {
                         "global_step": global_step,
                         "loss": loss,
@@ -543,6 +548,7 @@ def main():
                     output_model_file = os.path.join(args.output_dir, "step-%s_f1-%.2f.bin" % (str(global_step), result["eval_f1"]))
                     torch.save(model_to_save.state_dict(), output_model_file)
                     best_result.append((result["eval_f1"], output_model_file))
+                    ## sort by f1 and remove model whose f1 is the fourth biggest 
                     best_result.sort(key=lambda x: x[0], reverse=True)
                     if len(best_result) > 3:
                         _, model_to_remove = best_result.pop()
@@ -619,7 +625,7 @@ def main():
             eval_steps += 1
 
         eval_loss = eval_loss / eval_steps
-        p, r, f1, fpr, tp, fp, fn = Metrics.compute(all_inputs, all_labels, all_predictions)
+        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
@@ -632,6 +638,10 @@ def main():
         output_fn_file = os.path.join(args.output_dir, "sents.fn")
         with open(output_fn_file, "w") as writer:
             for line in fn:
+                writer.write(line + "\n")
+        output_wp_file = os.path.join(args.output_dir, "sents.wp")
+        with open(output_wp_file, "w") as writer:
+            for line in wp:
                 writer.write(line + "\n")
 
         result = {

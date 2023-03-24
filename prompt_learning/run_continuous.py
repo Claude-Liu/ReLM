@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
-from tqdm.auto import tqdm
+from tqdm import *
 from transformers import AutoTokenizer
 from transformers import SchedulerType, get_scheduler
 from transformers import BertForMaskedLM
@@ -54,17 +54,20 @@ class PTuningWrapper(nn.Module):
         attention_mask=None,
         token_type_ids=None,
         prompt_mask=None,##(batch,msl)
-        labels=None
+        labels=None,
+        do_train=True
     ):
         if inputs_embeds==None:
             inputs_embeds = self.word_embeddings(input_ids)##inputs_embeds(batch,seq,hidden)
             replace_embeds = self.prompt_embeddings(torch.LongTensor(list(range(2*self.prompt_length))).to(input_ids.device))
-            replace_embeds = replace_embeds.unsqueeze(0)##(1,2*prompt_length,hidden_size)
 
-            replace_embeds = self.prompt_lstm(replace_embeds)[0]##(2*prompt_length,2*hidden_size)
-            replace_embeds = self.prompt_linear(replace_embeds).squeeze()##(2*prompt_length,hidden_size)
+            if do_train:
+                replace_embeds = replace_embeds.unsqueeze(0)##(1,2*prompt_length,hidden_size)
+                replace_embeds = self.prompt_lstm(replace_embeds)[0]##(2*prompt_length,2*hidden_size)
+                replace_embeds = self.prompt_linear(replace_embeds).squeeze()##(2*prompt_length,hidden_size)
             ##prompt_mask(batch,seq)-->blocked_indices:(batch,2*prompt_length)
             ##p1,p2,p3,x1,...xn,p4,p5,p6,m1,...mn
+            ## (batch,2*prompt_length)
             blocked_indices = (prompt_mask == 1).nonzero().reshape((input_ids.shape[0], 2*self.prompt_length, 2))[:, :, 1]##indices of the prompts p, 
             for i in range(input_ids.shape[0]):
                 for j in range(blocked_indices.shape[1]):
@@ -237,7 +240,8 @@ class Metrics:
 
             return "".join(ret)
 
-        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents = [], [], [], [], [], [], []
+        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents  = [], [], [], [], [], [], [], []
+        ## wp_sents are the positive examples corrected in a wrong way (s!=t&p!=t&p!=s)
         for s, t, p in zip(src_sents, trg_sents, prd_sents):
             # For positive examples
             if s != t:
@@ -246,6 +250,8 @@ class Metrics:
                     tp_sents.append(difference(s, t))
                 if p == s:
                     fn_sents.append(difference(s, t))
+                if (p!=t and p!=s):
+                    wp_sents.append(difference(s,t))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
@@ -262,7 +268,7 @@ class Metrics:
         f1 = 2.0 * (p * r) / (p + r + 1e-12)
         fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
 
-        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents
+        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 
 def mask_tokens(inputs, tokenizer, noise_probability=0.2):
@@ -417,6 +423,7 @@ def main():
             model = torch.nn.DataParallel(model)##It is recommended to use DistributedDataParallel
 
         no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
+        ## apply weight decay
         optimizer_grouped_parameters = [
             {
                 "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
@@ -427,7 +434,7 @@ def main():
                 "weight_decay": 0.0
             }
         ]
-
+        ## set the Adam optimizer
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
         scheduler = get_scheduler(name=args.lr_scheduler_type,
                                   optimizer=optimizer,
@@ -470,7 +477,7 @@ def main():
         best_result = list()
         wrap = False
         progress_bar = tqdm(range(args.max_train_steps))
-        for _ in progress_bar:
+        for _ in range(int(args.num_train_epochs)):
             train_loss = 0
             num_train_examples = 0
             if wrap: break
@@ -485,12 +492,14 @@ def main():
                         outputs = model(input_ids=src_ids,
                                         attention_mask=attention_mask,
                                         prompt_mask=block_flag,
-                                        labels=trg_ids)
+                                        labels=trg_ids,
+                                        do_train=True)
                 else:
                     outputs = model(input_ids=src_ids,
                                     attention_mask=attention_mask,
                                     prompt_mask=block_flag,
-                                    labels=trg_ids)
+                                    labels=trg_ids,
+                                    do_train=True)
                 loss = outputs.loss
 
                 if n_gpu > 1:
@@ -512,7 +521,7 @@ def main():
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
-                    scheduler.step()
+                    scheduler.step()## schedule the lr dynamically
                     global_step += 1
                     progress_bar.update(1)
 
@@ -528,30 +537,16 @@ def main():
                     eval_loss = 0
                     eval_steps = 0
                     all_inputs, all_labels, all_predictions = [], [], []
-                    for batch in eval_dataloader:
+                    for batch in tqdm(eval_dataloader, desc="Evaluation"):
                         batch = tuple(t.to(device) for t in batch)
                         src_ids, attention_mask, trg_ids, block_flag = batch
 
                         with torch.no_grad():
-                            raw_embeds = model.word_embeddings(src_ids)
-                            replace_embeds = model.prompt_embeddings(torch.LongTensor(list(range(2*model.prompt_length))).to(device))
-                            replace_embeds = replace_embeds.unsqueeze(0)##(1,2*prompt_length,hidden)
-
-                            if 1:
-                                replace_embeds = model.prompt_lstm(replace_embeds)[0]
-                                replace_embeds = model.prompt_linear(replace_embeds).squeeze()
-                            else:##how to discard the lstm head???
-                                replace_embeds = model.prompt_linear(replace_embeds)
-
-                            blocked_indices = (block_flag == 1).nonzero().reshape((src_ids.shape[0], 2*model.prompt_length, 2))[:, :, 1]
-
-                            for i in range(src_ids.shape[0]):
-                                for j in range(blocked_indices.shape[1]):
-                                    raw_embeds[i, blocked_indices[i, j], :] = replace_embeds[j, :]
-
-                            outputs = model(inputs_embeds=raw_embeds,
+                            outputs = model(input_ids=src_ids,## give the emeddings directly
                                             attention_mask=attention_mask,
-                                            labels=trg_ids)
+                                            labels=trg_ids,
+                                            prompt_mask=block_flag,
+                                            do_train=True)##??
                             tmp_eval_loss = outputs.loss
                             logits = outputs.logits
 
@@ -559,7 +554,7 @@ def main():
                         trg_ids = trg_ids.cpu().numpy()
                         eval_loss += tmp_eval_loss.mean().item()
                         _, prd_ids = torch.max(logits, -1)##(batch,seq)
-                        prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist()##reset the padding part to 0
+                        prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist()##set the padding part to 0
                         for s, t, p in zip(src_ids, trg_ids, prd_ids):
 
                             mapped_src = []
@@ -575,7 +570,7 @@ def main():
                                     mapped_src += [st]
                                 else:
                                     mapped_trg += [tt]
-                                    if st == tokenizer.mask_token_id:##we only predict the 
+                                    if st == tokenizer.mask_token_id:##we only predict the masked tokens
                                         mapped_prd += [pt]
                                     else:
                                         mapped_prd += [st]
@@ -588,7 +583,7 @@ def main():
     
                     loss = train_loss / global_step
                     eval_loss = eval_loss / eval_steps
-                    p, r, f1, fpr, tp, fp, fn = Metrics.compute(all_inputs, all_labels, all_predictions)
+                    p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
     
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
                     with open(output_tp_file, "w") as writer:
@@ -601,6 +596,10 @@ def main():
                     output_fn_file = os.path.join(args.output_dir, "sents.fn")
                     with open(output_fn_file, "w") as writer:
                         for line in fn:
+                            writer.write(line + "\n")
+                    output_wp_file = os.path.join(args.output_dir, "sents.wp")
+                    with open(output_wp_file, "w") as writer:
+                        for line in wp:
                             writer.write(line + "\n")
 
                     result = {
@@ -616,6 +615,7 @@ def main():
                     output_model_file = os.path.join(args.output_dir, "step-%s_f1-%.2f.bin" % (str(global_step), result["eval_f1"]))
                     torch.save(model_to_save.state_dict(), output_model_file)##save the model
                     best_result.append((result["eval_f1"], output_model_file))
+                    ## sort by f1 and remove model whose f1 is the fourth biggest 
                     best_result.sort(key=lambda x: x[0], reverse=True)
                     if len(best_result) > 3:
                         _, model_to_remove = best_result.pop()
@@ -673,11 +673,13 @@ def main():
         all_inputs, all_labels, all_predictions = [], [], []
         for batch in eval_dataloader:
             batch = tuple(t.to(device) for t in batch)
-            src_ids, attention_mask, trg_ids = batch
+            src_ids, attention_mask, trg_ids, block_flag = batch
             with torch.no_grad():
                 outputs = model(input_ids=src_ids,
                                 attention_mask=attention_mask,
-                                labels=trg_ids)
+                                labels=trg_ids,
+                                prompt_mask=block_flag,
+                                do_train=True)##??
                 tmp_eval_loss = outputs.loss
                 logits = outputs.logits
 
@@ -700,7 +702,7 @@ def main():
                         mapped_src += [st]
                     else:
                         mapped_trg += [tt]
-                        if st == tokenizer.mask_token_id:##we only predict the 
+                        if st == tokenizer.mask_token_id:##we only predict the masked tokens
                             mapped_prd += [pt]
                         else:
                             mapped_prd += [st]
@@ -711,7 +713,7 @@ def main():
             eval_steps += 1
 
         eval_loss = eval_loss / eval_steps
-        p, r, f1, fpr, tp, fp, fn = Metrics.compute(all_inputs, all_labels, all_predictions)
+        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
@@ -724,6 +726,10 @@ def main():
         output_fn_file = os.path.join(args.output_dir, "sents.fn")
         with open(output_fn_file, "w") as writer:
             for line in fn:
+                writer.write(line + "\n")
+        output_wp_file = os.path.join(args.output_dir, "sents.wp")
+        with open(output_wp_file, "w") as writer:
+            for line in wp:
                 writer.write(line + "\n")
 
         result = {
