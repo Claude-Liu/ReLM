@@ -161,10 +161,10 @@ class EcspellProcessor:
         return examples
 
 
-def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_length, mask_src=False):
+def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_length, mask_src=False, anchor=None):
     features = []
     for i, example in enumerate(examples):
-        src, trg, block_flag = convert_examples_to_prompts(example.src, example.trg, prompt_length, max_seq_length // 2, tokenizer, mask_src)
+        src, trg, block_flag = convert_examples_to_prompts(example.src, example.trg, prompt_length, max_seq_length // 2, tokenizer, mask_src, anchor)
         example.src = src
         example.trg = trg
         encoded_inputs = tokenizer(example.src,
@@ -212,19 +212,29 @@ def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_len
     return features
 
 
-def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, mask_src=False):
+def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, mask_src=False, anchor=None):
     def truncate(x, max_length):
         return x[: max_length]
     ## here max_seq = tokenizer.max_seq_length//2, we need to truncate
     src = truncate(src, max_seq_length)
     trg = truncate(trg, max_seq_length)
-    if mask_src:
-        prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+    if anchor is not None:
+        if mask_src:
+            prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + \
+                anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+        else:
+            ##[CLS]...[CLS],x1,x2,...,xn,[SEP],[anchor_1],...,[anchor_n],[SEP],...,[SEP],m1,m2,...,mn
+            prompt_src = [tokenizer.cls_token] * prompt_length + src + anchor + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+        prompt_trg = [tokenizer.cls_token] * prompt_length + src + anchor + [tokenizer.sep_token] * prompt_length + trg
+        block_flag = [1] * prompt_length + [0 for _ in src] + [0 for _ in anchor] + [1] * prompt_length + [0 for _ in trg]
     else:
-        ##[CLS]...[CLS],x1,x2,...,xn,[SEP],...,[SEP],m1,m2,...,mn
-        prompt_src = [tokenizer.cls_token] * prompt_length + src + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
-    prompt_trg = [tokenizer.cls_token] * prompt_length + src + [tokenizer.sep_token] * prompt_length + trg
-    block_flag = [1] * prompt_length + [0 for _ in src] + [1] * prompt_length + [0 for _ in trg]
+        if mask_src:
+            prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+        else:
+            ##[CLS]...[CLS],x1,x2,...,xn,[SEP],...,[SEP],m1,m2,...,mn
+            prompt_src = [tokenizer.cls_token] * prompt_length + src + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+        prompt_trg = [tokenizer.cls_token] * prompt_length + src + [tokenizer.sep_token] * prompt_length + trg
+        block_flag = [1] * prompt_length + [0 for _ in src] + [1] * prompt_length + [0 for _ in trg]
 
     return prompt_src, prompt_trg, block_flag
 
@@ -353,6 +363,7 @@ def main():
                         help="Whether to keep LM parameters frozen.")
     parser.add_argument("--mft", action="store_true",
                         help="Training with masked-fine-tuning (not published yet).")
+    parser.add_argument("--anchor",type=str,default=None,help="the anchor tokens we add to the prompt.")
 
     args = parser.parse_args()
 
@@ -380,6 +391,7 @@ def main():
     if args.do_train:
         torch.save(args, os.path.join(args.output_dir, "train_args.bin"))
 
+
     task_name = args.task_name.lower()
     if task_name not in processors:
         raise ValueError("Task not found: %s" % task_name)
@@ -391,10 +403,14 @@ def main():
                                               do_lower_case=args.do_lower_case,
                                               cache_dir=cache_dir,
                                               use_fast=not args.use_slow_tokenizer)
+    
+    anchor=None
+    if args.anchor is not None:
+        anchor=[tokenizer.sep_token]+[t for t in args.anchor]
 
     if args.do_train:
         train_examples = processor.get_train_examples(os.path.join(args.data_dir, task_name), args.train_on)
-        train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer, args.prompt_length, args.mft)
+        train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer, args.prompt_length, args.mft, anchor=anchor)
 
         all_input_ids = torch.tensor([f.src_ids for f in train_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
@@ -456,7 +472,7 @@ def main():
         
         if args.do_eval:
             eval_examples = processor.get_dev_examples(os.path.join(args.data_dir, task_name), args.eval_on)
-            eval_features = convert_examples_to_features(eval_examples, args.max_seq_length,  tokenizer, args.prompt_length)##never mask the source during evaluation
+            eval_features = convert_examples_to_features(eval_examples, args.max_seq_length,  tokenizer, args.prompt_length, anchor=anchor)##never mask the source during evaluation
 
             all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
             all_input_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
@@ -485,6 +501,7 @@ def main():
                 model.train()
                 batch = tuple(t.to(device) for t in batch)
                 src_ids, attention_mask, trg_ids, block_flag = batch
+                ## only loss on the masked positions are included when calculating loss
                 trg_ids[(src_ids == trg_ids)] = -100 ##ignore index = -100
 
                 if args.fp16:
@@ -561,8 +578,8 @@ def main():
                             mapped_trg = []
                             mapped_prd = []
                             flag = False## if we pass to the target part
-                            ##src: [CLS]+[CLS]...+src+[SEP]...+trg+[SEP]
-                            ##trg: [CLS]+[CLS]...+src+[SEP]...+trg+[SEP]
+                            ##src: [CLS]+[CLS]...+src+[SEP]...+[mask]
+                            ##trg: [CLS]+[CLS]...+src+[SEP]...+trg
                             for st, tt, pt in zip(s, t, p):
                                 if st == tokenizer.sep_token_id:
                                     flag = True
@@ -574,7 +591,14 @@ def main():
                                         mapped_prd += [pt]
                                     else:
                                         mapped_prd += [st]
-                            ## we skip special tokens including '[UNK]'
+                            if anchor is not None:
+                                ##src: [CLS]+[CLS]...+src+[SEP]+anchor+[SEP]...+[mask]
+                                ##trg: [CLS]+[CLS]...+src+[SEP]+anchor+[SEP]...+trg
+                                ## remove the anchor tokens from the src
+                                anchor_length = len(anchor)
+                                del mapped_trg[:anchor_length]
+                                del mapped_prd[:anchor_length]
+                            ## we skip special tokens including '[UNK]','[SEP]'
                             all_inputs += [decode(mapped_src)]
                             all_labels += [decode(mapped_trg)]
                             all_predictions += [decode(mapped_prd)]
@@ -640,7 +664,7 @@ def main():
 
     if args.do_test:
         eval_examples = processor.get_test_examples(os.path.join(args.data_dir, task_name), args.test_on)
-        eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer, args.prompt_length)
+        eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer, args.prompt_length, anchor=anchor)
 
         all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
@@ -706,6 +730,13 @@ def main():
                             mapped_prd += [pt]
                         else:
                             mapped_prd += [st]
+                if anchor is not None:
+                    ##src: [CLS]+[CLS]...+src+[SEP]+anchor+[SEP]...+[mask]
+                    ##trg: [CLS]+[CLS]...+src+[SEP]+anchor+[SEP]...+trg
+                    ## remove the anchor tokens from the src
+                    anchor_length = len(anchor)
+                    del mapped_trg[:anchor_length]
+                    del mapped_prd[:anchor_length]
                 ## we skip special tokens including '[UNK]'
                 all_inputs += [decode(s)]
                 all_labels += [decode(t)]
