@@ -113,28 +113,35 @@ class Metrics:
                     ret[i] = "(" + src_char + "->" + trg_char + ")"
 
             return "".join(ret)
-
+        def equals(src,trg):
+            if len(src)!=len(trg):
+                return False
+            for i,(st,tt) in enumerate(zip(src,trg)):
+                if st not in ['.','。',',','，','?','？',':','：'] and st!=tt:
+                    ##print("{}->{}".format(st,tt))
+                    return False
+            return True
         pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents  = [], [], [], [], [], [], [], []
         ## wp_sents are the positive examples corrected in a wrong way (s!=t&p!=t&p!=s)
         for s, t, p in zip(src_sents, trg_sents, prd_sents):
             # For positive examples
-            if s != t:
+            if not equals(s,t):
                 pos_sents.append(difference(s, t))
-                if p == t:
+                if equals(t,p):
                     tp_sents.append(difference(s, t))
-                if p == s:
+                if equals(s,p):
                     fn_sents.append(difference(s, t))
-                if (p!=t and p!=s):
+                if (not equals(p,t)) and (not equals(p,s)):
                     wp_sents.append(difference(s,t))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
-                if p != t:
+                if not equals(p,t):
                     fp_sents.append(difference(t, p))
             # For predictions
-            if s != p:
+            if not equals(p,s):
                 prd_pos_sents.append(difference(s, p))
-            if s == p:
+            if equals(p,s):
                 prd_neg_sents.append(difference(s, p))
 
         p = 1.0 * len(tp_sents) / len(prd_pos_sents)
@@ -146,8 +153,10 @@ class Metrics:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--use_chatgpt",action="store_true")
+    parser.add_argument("--load_messages",action="store_true")
     parser.add_argument("--key_file",type=str,default="../envs/openai_key",help="the file containing the api key")
-    parser.add_argument("--message_file",type=str,default="model/messages.json",help="the file to store the chat messages")
+    parser.add_argument("--message_file",type=str,default="model/messages_med.json",help="the file to store the chat messages")
     parser.add_argument("--data_dir", type=str, default="../data/csc/",
                         help="Directory to contain the input data for all tasks.")
     parser.add_argument("--task_name", type=str, default="ecspell",
@@ -158,44 +167,56 @@ def main():
     parser.add_argument("--begin",type=int,default=None)
     
     args = parser.parse_args()
+    if args.use_chatgpt:
+        processors = {
+            "sighan": SighanProcessor,
+            "ecspell": EcspellProcessor,
+        }
+        task_name = args.task_name.lower()
+        if task_name not in processors:
+            raise ValueError("Task not found: %s" % task_name)
+        processor = processors[task_name]()
+        ### initialize the chatgpt############
+        chat=ChatGPT4CSC(key_file=args.key_file)
+        chat.get_api_key()
+        logger.info("api_key: %s",chat.openai_key)
+        ### load the data#####################
+        test_examples=processor.get_test_examples(os.path.join(args.data_dir,args.task_name),division=args.test_on)##[example(.src,.trg,.guid)]
+        all_preds=[]
+        all_srcs=[]
+        all_trgs=[]
+        messages=[]
+        for i,example in enumerate(tqdm(test_examples,desc="Test")):
+            if args.begin is not None and i<args.begin:
+                continue
+            try:
+                src=example.src##[t1,t2,...,tn]
+                trg=example.trg
+                prediction=chat.gptCorrect("".join(src))
+                if i%100 == 0 or (i%10==0 and i<100):
+                    logger.info("src: %s \n prediction: %s", "".join(src),prediction)
+                all_preds.append(list(prediction))
+                all_srcs.append(src)
+                all_trgs.append(trg)
+                messages.append({"src":"".join(src),"trg":"".join(trg), "pred":prediction})
+            except:
+                with open(args.message_file, 'w', encoding='utf-8') as f:
+                    json.dump(messages,f, ensure_ascii=False,indent=4)
+                raise
+        with open(args.message_file, 'w', encoding='utf-8') as f:
+            json.dump(messages,f, ensure_ascii=False,indent=4)
+    else:
+        all_preds=[]
+        all_srcs=[]
+        all_trgs=[]
+        if args.load_messages:
+            with open(args.message_file,'r',encoding='utf-8') as f:
+                messages=json.load(f)
+        for i, message in enumerate(messages):
+            all_preds.append(list(message['pred']))
+            all_srcs.append(list(message['src']))
+            all_trgs.append(list(message['trg']))
 
-    processors = {
-        "sighan": SighanProcessor,
-        "ecspell": EcspellProcessor,
-    }
-    task_name = args.task_name.lower()
-    if task_name not in processors:
-        raise ValueError("Task not found: %s" % task_name)
-    processor = processors[task_name]()
-    ### initialize the chatgpt############
-    chat=ChatGPT4CSC(key_file=args.key_file)
-    chat.get_api_key()
-    logger.info("api_key: %s",chat.openai_key)
-    ### load the data#####################
-    test_examples=processor.get_test_examples(os.path.join(args.data_dir,args.task_name),division=args.test_on)##[example(.src,.trg,.guid)]
-    all_preds=[]
-    all_srcs=[]
-    all_trgs=[]
-    messages=[]
-    for i,example in enumerate(tqdm(test_examples,desc="Test")):
-        if args.begin is not None and i<args.begin:
-            continue
-        try:
-            src=example.src##[t1,t2,...,tn]
-            trg=example.trg
-            prediction=chat.gptCorrect("".join(src))
-            if i%100 == 0 or (i%10==0 and i<100):
-                logger.info("src: %s \n prediction: %s", "".join(src),prediction)
-            all_preds.append(list(prediction))
-            all_srcs.append(src)
-            all_trgs.append(trg)
-            messages.append({"src":"".join(src),"trg":"".join(trg), "pred":prediction})
-        except:
-            with open(args.message_file, 'w', encoding='utf-8') as f:
-                json.dump(messages,f, ensure_ascii=False,indent=4)
-            raise
-    with open(args.message_file, 'w', encoding='utf-8') as f:
-        json.dump(messages,f, ensure_ascii=False,indent=4)
     p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_srcs, all_trgs, all_preds)
     output_tp_file = os.path.join(args.output_dir, "sents.tp")
     with open(output_tp_file, "w", encoding="utf-8") as writer:
