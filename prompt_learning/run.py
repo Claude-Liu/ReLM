@@ -437,7 +437,7 @@ def main():
         best_result = list()
         wrap = False
         progress_bar = tqdm(range(args.max_train_steps))
-        for _ in progress_bar:
+        for _ in range(int(args.num_train_epochs)):
             train_loss = 0
             num_train_examples = 0
             if wrap: break
@@ -494,7 +494,7 @@ def main():
                     eval_loss = 0
                     eval_steps = 0
                     all_inputs, all_labels, all_predictions = [], [], []
-                    for batch in eval_dataloader:
+                    for batch in tqdm(eval_dataloader, desc="Evaluation"):
                         batch = tuple(t.to(device) for t in batch)
                         src_ids, attention_mask, trg_ids = batch
                         with torch.no_grad():
@@ -603,7 +603,7 @@ def main():
         eval_loss = 0
         eval_steps = 0
         all_inputs, all_labels, all_predictions = [], [], []
-        for batch in eval_dataloader:
+        for batch in tqdm(eval_dataloader, desc="Evaluation"):
             batch = tuple(t.to(device) for t in batch)
             src_ids, attention_mask, trg_ids = batch
             with torch.no_grad():

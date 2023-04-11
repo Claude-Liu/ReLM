@@ -695,7 +695,7 @@ def main():
         eval_loss = 0
         eval_steps = 0
         all_inputs, all_labels, all_predictions = [], [], []
-        for batch in eval_dataloader:
+        for batch in tqdm(eval_dataloader, desc="Evaluation"):
             batch = tuple(t.to(device) for t in batch)
             src_ids, attention_mask, trg_ids, block_flag = batch
             with torch.no_grad():
