@@ -11,13 +11,20 @@
 
 the model evaluated on sighan15 is trained on train_all.txt
 
-|          | CPT（l=3） | CPT+MLM(l=3) | FT    | MFT       | chatGPT |
-| -------- | ---------- | ------------ | ----- | --------- | ------- |
-| law      | **55.51**  | **72.31**    | 37.87 | 66.27     | 34.82   |
-| med      | **60.03**  | **71.53**    | 22.34 | 53.11     | 19.12   |
-| sighan15 | **51.95**  | 52.51        | 43.37 | **52.63** |         |
+sighan15(1) fine-tuned on train_all.txt
 
-influence of the length of prompt
+sighan15(2) fine-tuned on train_hybrid.txt and train_all.txt
+
+|                        | CPT（l=3） | CPT+MLM(l=3) | FT    | MFT       | chatGPT |
+| ---------------------- | ---------- | ------------ | ----- | --------- | ------- |
+| law                    | **55.51**  | **72.31**    | 37.87 | 66.27     | 34.82   |
+| med                    | **60.03**  | **71.53**    | 22.34 | 53.11     | 19.12   |
+| sighan15 (1)           | **51.95**  | 52.51        | 43.37 | **52.63** |         |
+| sighan15 (2)           |            |              |       |           |         |
+| sghspell (random)      |            |              |       |           |         |
+| sghspell (max entropy) |            |              |       |           |         |
+
+#### influence of the length of prompt
 
 |      | CPT（l=2） | CPT+MLM(l=2) | CPT（l=4） | CPT+MLM(l=4) | CPT（l=3） | CPT+MLM(l=3) |
 | ---- | ---------- | ------------ | ---------- | ------------ | ---------- | ------------ |
@@ -26,7 +33,7 @@ influence of the length of prompt
 
 l=3 is the best for law, and the result is relatively stable. (all the results are better than fine-tuning)
 
-influence of anchor
+#### influence of anchor
 
 ##### CPT
 

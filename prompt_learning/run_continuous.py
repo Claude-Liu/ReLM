@@ -370,6 +370,7 @@ def main():
     processors = {
         "sighan": SighanProcessor,
         "ecspell": EcspellProcessor,
+        "sghspell": SighanProcessor
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
