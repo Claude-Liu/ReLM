@@ -3,6 +3,10 @@
 1. discard the LSTM head
 1. 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
 
+## code of P-tuning
+
+
+
 ## result
 
 #### P-tuning 

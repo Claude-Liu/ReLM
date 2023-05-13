@@ -67,6 +67,7 @@ class PTuningWrapper(nn.Module):
                 replace_embeds = self.prompt_linear(replace_embeds).squeeze()##(2*prompt_length,hidden_size)
             ##prompt_mask(batch,seq)-->blocked_indices:(batch,2*prompt_length)
             ##p1,p2,p3,x1,...xn,p4,p5,p6,m1,...mn
+            ## maybe x1,...xn,p1,p2,p3,m1,...mn is better??
             ## (batch,2*prompt_length)
             blocked_indices = (prompt_mask == 1).nonzero().reshape((input_ids.shape[0], 2*self.prompt_length, 2))[:, :, 1]##indices of the prompts p, 
             for i in range(input_ids.shape[0]):
@@ -216,8 +217,8 @@ def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokeniz
     def truncate(x, max_length):
         return x[: max_length]
     ## here max_seq = tokenizer.max_seq_length//2, we need to truncate
-    src = truncate(src, max_seq_length)
-    trg = truncate(trg, max_seq_length)
+    src = truncate(src, max_seq_length-prompt_length)
+    trg = truncate(trg, max_seq_length-prompt_length)
     if anchor is not None:
         if mask_src:
             prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + \
