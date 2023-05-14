@@ -594,8 +594,8 @@ def main():
                                     else:
                                         mapped_prd += [st]
                             if anchor is not None:
-                                ##src: [CLS]+[CLS]...+src+[SEP]+anchor+[SEP]...+[mask]
-                                ##trg: [CLS]+[CLS]...+src+[SEP]+anchor+[SEP]...+trg
+                                ##src: [CLS]+[CLS]...+src+anchor+[SEP]...+[mask]
+                                ##trg: [CLS]+[CLS]...+src+anchor+[SEP]...+trg
                                 ## remove the anchor tokens from the src
                                 anchor_length = len(anchor)
                                 del mapped_trg[:anchor_length]

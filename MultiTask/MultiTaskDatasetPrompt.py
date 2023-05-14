@@ -162,7 +162,7 @@ def seq_convert_examples_to_features(examples, label_list, prompt_length, mask_l
         active_bits = []
         label_ids = [label_map[example.label]]
         task_id = example.task.id
-        for phi in example.input_tempalte:
+        for phi in example.input_template:
             if phi == "<text>":
                 ## when tokenizer: no padding, input have not been split into words
                 if example.text_b:
@@ -200,7 +200,7 @@ def seq_convert_examples_to_features(examples, label_list, prompt_length, mask_l
                 prompt_mask += [0]
                 active_bits += [-100]
         ## max_length is the final length of features in the batch
-        max_length = max_seq_length + prompt_length + mask_length +2
+        max_length = max_seq_length + prompt_length + 2 ## mask_length = 1 or 2
         if len(attention_mask) < max_length:
             attention_mask += [0] * (max_length - len(attention_mask))
         if len(token_type_ids) < max_length:
@@ -234,7 +234,7 @@ def seq_convert_examples_to_features(examples, label_list, prompt_length, mask_l
 
         features.append(
             InputFeatures(input_ids=input_ids,
-                          attention_mask=attention_mask,
+                          input_mask=attention_mask,
                           token_type_ids=token_type_ids,
                           prompt_mask=prompt_mask,
                           active_bits=active_bits,
@@ -340,7 +340,7 @@ def csc_convert_examples_to_features(examples, max_seq_length, tokenizer, prompt
     features = []
     for i, example in enumerate(examples):
         ## max_seq_length = max_length in sent_class
-        src, trg, block_flag = convert_examples_to_prompts(example.src, example.trg, prompt_length, max_seq_length // 2, tokenizer, mask_src, anchor)
+        src, trg, block_flag = convert_examples_to_prompts(example.text_a, example.label, prompt_length, max_seq_length // 2, tokenizer, mask_src, anchor)
         example.text_a = src
         example.label = trg
         encoded_inputs = tokenizer(example.text_a,
