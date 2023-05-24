@@ -310,7 +310,7 @@ class EcspellProcessor:
                     examples.append(InputExample(guid=guid, text_a=src, label=trg, task=task))
         return examples
 
-def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, mask_src=False, anchor=None):
+def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, mask_src=False, mask_mode="noerror", anchor=None):
     def truncate(x, max_length):
         return x[: max_length]
     ## here max_seq = tokenizer.max_seq_length//2, we need to truncate
@@ -318,8 +318,16 @@ def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokeniz
     trg = truncate(trg, max_seq_length-prompt_length)
     if anchor is not None:
         if mask_src:
-            prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + \
-                anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            if mask_mode == "noerror":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st==tt ) else st for st,tt in zip(src,trg)]+ \
+                    anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            elif mask_mode == "error":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st!=tt ) else st for st,tt in zip(src,trg)]+ \
+                    anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            else:
+                assert mask_mode == "all"
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else st for st in src]+ \
+                    anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
         else:
             ##[CLS]...[CLS],x1,x2,...,xn,[anchor_1],...,[anchor_n],[SEP],...,[SEP],m1,m2,...,mn
             prompt_src = [tokenizer.cls_token] * prompt_length + src + anchor + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
@@ -327,7 +335,16 @@ def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokeniz
         block_flag = [1] * prompt_length + [0 for _ in src] + [0 for _ in anchor] + [1] * prompt_length + [0 for _ in trg]
     else:
         if mask_src:
-            prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            if mask_mode == "noerror":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st==tt ) else st for st,tt in zip(src,trg)]+ \
+                    [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            elif mask_mode == "error":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st!=tt ) else st for st,tt in zip(src,trg)]+ \
+                    [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            else:
+                assert mask_mode == "all"
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else st for st in src]+ \
+                    [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
         else:
             ##[CLS]...[CLS],x1,x2,...,xn,[SEP],...,[SEP],m1,m2,...,mn
             prompt_src = [tokenizer.cls_token] * prompt_length + src + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
@@ -336,11 +353,11 @@ def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokeniz
 
     return prompt_src, prompt_trg, block_flag
 
-def csc_convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_length, mask_src=False, anchor=None):
+def csc_convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_length, mask_src=False, mask_mode="noerror", anchor=None):
     features = []
     for i, example in enumerate(examples):
         ## max_seq_length = max_length in sent_class
-        src, trg, block_flag = convert_examples_to_prompts(example.text_a, example.label, prompt_length, max_seq_length // 2, tokenizer, mask_src, anchor)
+        src, trg, block_flag = convert_examples_to_prompts(example.text_a, example.label, prompt_length, max_seq_length // 2, tokenizer, mask_src, mask_mode, anchor)
         example.text_a = src
         example.label = trg
         encoded_inputs = tokenizer(example.text_a,

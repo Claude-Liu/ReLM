@@ -45,12 +45,12 @@ class PTuningWrapper(nn.Module):
         self.prompt_length_sent = prompt_length_sent
         self.verbalizer_tnews = verbalizer_tnews
         self.verbalizer_afqmc = verbalizer_afqmc
-        self.tnews_label_words_ids = verbalizer_tnews.label_words_ids
-        self.afqmc_label_words_ids = verbalizer_afqmc.label_words_ids
+        self.tnews_label_words_ids = None if verbalizer_tnews == None else verbalizer_tnews.label_words_ids
+        self.afqmc_label_words_ids = None if verbalizer_afqmc == None else verbalizer_afqmc.label_words_ids
 
         self.csc_num_labels = self.config.vocab_size
-        self.tnews_num_labels = verbalizer_tnews.num_labels
-        self.afqmc_num_labels = verbalizer_afqmc.num_labels
+        self.tnews_num_labels = None if verbalizer_tnews == None else verbalizer_tnews.num_labels
+        self.afqmc_num_labels = None if verbalizer_afqmc == None else verbalizer_afqmc.num_labels
 
         self.model = model  # mlm
         # the embdedding layer of BERT
@@ -205,8 +205,7 @@ class PTuningWrapper(nn.Module):
             afqmc_active_bits = active_bits[afqmc_task_filter]
             afqmc_logits = afqmc_logits[torch.where(afqmc_active_bits != -100)]  # afqmc_batch,vocab
 
-            # afqmc_batch,num_label,num_label_mapping
-            label_words_logits = afqmc_logits[:, self.afqmc_label_words_ids]
+            label_words_logits = afqmc_logits[:, self.afqmc_label_words_ids] # afqmc_batch,num_label,num_label_mapping
             label_words_logits = torch.sum(label_words_logits, dim=-1)  # afqmc_batch,num_label
             afqmc_loss = None
             if labels is not None:
@@ -280,21 +279,6 @@ class Metrics:
         return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 
-def mask_tokens(inputs, tokenizer, noise_probability=0.2):
-    inputs = inputs.clone()
-    probability_matrix = torch.full(inputs.shape, noise_probability)
-    special_tokens_mask = [
-        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
-    ]
-    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
-
-    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-    masked_indices = torch.bernoulli(probability_matrix).bool()
-    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-
-    return inputs
-
-
 def main():
     parser = argparse.ArgumentParser()
 
@@ -363,6 +347,7 @@ def main():
                         help="How many steps to save the checkpoint once.")
     parser.add_argument("--mft", action="store_true",
                         help="Training with masked-fine-tuning (not published yet).")
+    parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
 
     parser.add_argument("--csc_prompt_length", type=int,
                         default=3, help="the length of the continuous prompt")
@@ -424,10 +409,12 @@ def main():
                                               cache_dir=cache_dir,
                                               use_fast=not args.use_slow_tokenizer,
                                               add_prefix_space=True)
-    verbalizers = {
-        "tnews": MultiTaskDatasetPrompt.Verbalizer(processors["tnews"].get_label_template(), tokenizer),
-        "afqmc": MultiTaskDatasetPrompt.Verbalizer(processors["afqmc"].get_label_template(), tokenizer),
-    }
+    ## initialize verbalizers we are going to use
+    verbalizers = {}
+    for task_name in task_names:
+        if task_name in  task_class["seq"]:
+            verbalizers[task_name] = MultiTaskDatasetPrompt.Verbalizer(processors[task_name].get_label_template(), tokenizer)
+
 
     max_seq_length_csc = args.max_seq_length+args.sent_prompt_length+2
     max_seq_length_sent = args.max_seq_length
@@ -446,7 +433,7 @@ def main():
             train_examples += train_examples_
             if task_name in task_class["csc"]:
                 train_features += csc_convert_examples_to_features(train_examples_, max_seq_length_csc, tokenizer,
-                                                                   args.csc_prompt_length, args.mft, anchor)
+                                                                   args.csc_prompt_length, args.mft, args.mask_mode, anchor)
             else:
                 assert(task_name in task_class["seq"])
                 label_list = processor.get_labels()
@@ -489,7 +476,12 @@ def main():
         model = BertForMaskedLM.from_pretrained(args.load_model_path,
                                                 return_dict=True,
                                                 cache_dir=cache_dir)
-        model = PTuningWrapper(model, tokenizer, verbalizers["tnews"], verbalizers["afqmc"],
+        verbalizer_tnews, verbalizer_afqmc = None, None
+        if "tnews" in verbalizers.keys():
+            verbalizer_tnews = verbalizers["tnews"]
+        if "afqmc" in verbalizers.keys():
+            verbalizer_afqmc = verbalizers["afqmc"]
+        model = PTuningWrapper(model, tokenizer, verbalizer_tnews, verbalizer_afqmc,
                                args.sent_prompt_length, args.csc_prompt_length)  # apply p-tuning(prompt) to the model
         model.to(device)
         if args.load_state_dict:
@@ -538,7 +530,7 @@ def main():
 
             if task_name in task_class["csc"]:
                 eval_features = csc_convert_examples_to_features(eval_examples, max_seq_length_csc, tokenizer,
-                                                                   args.csc_prompt_length, args.mft, anchor)
+                                                                   args.csc_prompt_length, anchor)
             else:
                 assert(task_name in task_class["seq"])
                 label_list = processor.get_labels()
@@ -783,11 +775,11 @@ def main():
     if args.do_test:
         task_name = task_names[0]  # we choose the first task to evaluate
         processor = processors[task_name]
-        eval_examples = processor.get_test_examples(os.path.join(args.data_dir, task_name), args.eval_on)
+        eval_examples = processor.get_test_examples(os.path.join(args.data_dir, task_name), args.test_on)
 
         if task_name in task_class["csc"]:
             eval_features = csc_convert_examples_to_features(eval_examples, max_seq_length_csc, tokenizer,
-                                                                args.csc_prompt_length, args.mft, anchor)
+                                                                args.csc_prompt_length, anchor)
         else:
             assert(task_name in task_class["seq"])
             label_list = processor.get_labels()
@@ -821,7 +813,12 @@ def main():
         model = BertForMaskedLM.from_pretrained(args.load_model_path,
                                                 return_dict=True,
                                                 cache_dir=cache_dir)
-        model = PTuningWrapper(model, tokenizer, verbalizers["tnews"], verbalizers["afqmc"],
+        verbalizer_tnews, verbalizer_afqmc = None, None
+        if "tnews" in verbalizers.keys():
+            verbalizer_tnews = verbalizers["tnews"]
+        if "afqmc" in verbalizers.keys():
+            verbalizer_afqmc = verbalizers["afqmc"]
+        model = PTuningWrapper(model, tokenizer, verbalizer_tnews, verbalizer_afqmc,
                                args.sent_prompt_length, args.csc_prompt_length)  # apply p-tuning(prompt) to the model
         model.to(device)
         ## load the checkpoints to do test
@@ -924,8 +921,7 @@ def main():
                 for line in wp:
                     writer.write(line + "\n")
             result = {
-                "global_step": global_step,
-                "loss": loss,
+                "eval_step": eval_steps,
                 "eval_loss": eval_loss,
                 "eval_p": p * 100,
                 "eval_r": r * 100,
@@ -934,36 +930,35 @@ def main():
             }
         else:
             result = {
-                "global_step": global_step,
-                "loss": loss,
+                "eval_step": eval_steps,
                 "eval_loss": eval_loss,
                 "eval_acc": acc*100,
                 "eval_f1": f1 * 100,
             }
-
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
         if task_name in task_class['csc']:
             with open(output_eval_file, "a") as writer:
                 logger.info("***** Eval results *****")
                 writer.write(
                     "Global step = %s | eval precision = %.2f | eval recall = %.2f | eval f1 = %.2f | eval fp rate = %.2f\n"
-                    % (str(result["global_step"]),
+                    % (str(-1),
                     result["eval_p"],
                     result["eval_r"],
                     result["eval_f1"],
                     result["eval_fpr"]))
                 for key in sorted(result.keys()):
-                    logger.info("Global step: %s,  %s = %s", str(global_step), key, str(result[key]))
+                    logger.info("Global step: %s,  %s = %s", str(-1), key, str(result[key]))
         else:
             with open(output_eval_file, "a") as writer:
                 logger.info("***** Eval results *****")
                 writer.write(
                     "Global step = %s |  eval f1 = %.2f |  eval acc = %.2f \n"
-                    % (str(result["global_step"]),
+                    % (str(-1),
                     result["eval_f1"],
                     result["eval_acc"]))
                 for key in sorted(result.keys()):
-                    logger.info("Global step: %s,  %s = %s", str(global_step), key, str(result[key]))
+                    logger.info("Global step: %s,  %s = %s", str(-1), key, str(result[key]))
+
 
 if __name__ == "__main__":
     main()

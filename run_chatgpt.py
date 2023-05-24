@@ -102,6 +102,32 @@ class EcspellProcessor:
                 if len(src) == len(trg):
                     examples.append(InputExample(guid=guid, src=src, trg=trg))
         return examples
+    
+class SQProcessor:
+
+    def get_test_examples(self, data_dir, division="s"):
+        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
+
+    @staticmethod
+    def _read_csv(input_file):
+        lines=[]
+        with open(input_file,'r',encoding='utf-8')as f:
+            for _,line in enumerate(f):
+                if _==0:
+                    continue
+                text,question,label = line.split('\t')
+                label=label.strip()
+                text = "\n".join([text,question])
+                lines.append((text,label))
+        return lines
+
+    @staticmethod
+    def _create_examples(lines, set_type):
+        examples = []
+        for i, (text, label) in enumerate(lines):
+            guid = "%s-%s" % (set_type, i)
+            examples.append(InputExample(guid=guid, src=text, trg=label))
+        return examples
 
 class Metrics:
     @staticmethod
@@ -161,7 +187,7 @@ def main():
                         help="Directory to contain the input data for all tasks.")
     parser.add_argument("--task_name", type=str, default="ecspell",
                         help="Name of the training task.")
-    parser.add_argument("--test_on", type=str, default="law",help="Choose a dev set.")
+    parser.add_argument("--test_on", type=str, default="s",help="Choose a dev set.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
     parser.add_argument("--begin",type=int,default=None)
@@ -171,6 +197,7 @@ def main():
         processors = {
             "sighan": SighanProcessor,
             "ecspell": EcspellProcessor,
+            "sq": SQProcessor,
         }
         task_name = args.task_name.lower()
         if task_name not in processors:

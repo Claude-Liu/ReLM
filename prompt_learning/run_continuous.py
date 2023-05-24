@@ -157,15 +157,14 @@ class EcspellProcessor:
         for i, (src, trg) in enumerate(lines):
             guid = "%s-%s" % (set_type, i)
             if len(src) == len(trg):
-                if len(src) == len(trg):
-                    examples.append(InputExample(guid=guid, src=src, trg=trg))
+                examples.append(InputExample(guid=guid, src=src, trg=trg))
         return examples
 
 
-def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_length, mask_src=False, anchor=None):
+def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_length, mask_src=False, mask_mode="noerror", anchor=None):
     features = []
     for i, example in enumerate(examples):
-        src, trg, block_flag = convert_examples_to_prompts(example.src, example.trg, prompt_length, max_seq_length // 2, tokenizer, mask_src, anchor)
+        src, trg, block_flag = convert_examples_to_prompts(example.src, example.trg, prompt_length, max_seq_length // 2, tokenizer, mask_src,mask_mode, anchor)
         example.src = src
         example.trg = trg
         encoded_inputs = tokenizer(example.src,
@@ -213,16 +212,25 @@ def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_len
     return features
 
 
-def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, mask_src=False, anchor=None):
+def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, mask_src=False, mask_mode="noerror", anchor=None):
     def truncate(x, max_length):
         return x[: max_length]
     ## here max_seq = tokenizer.max_seq_length//2, we need to truncate
     src = truncate(src, max_seq_length-prompt_length)
     trg = truncate(trg, max_seq_length-prompt_length)
+    assert(len(src)==len(trg))
     if anchor is not None:
         if mask_src:
-            prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + \
-                anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            if mask_mode == "noerror":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st==tt ) else st for st,tt in zip(src,trg)]+ \
+                    anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            elif mask_mode == "error":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st!=tt ) else st for st,tt in zip(src,trg)]+ \
+                    anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            else:
+                assert mask_mode == "all"
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else st for st in src]+ \
+                    anchor+[tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
         else:
             ##[CLS]...[CLS],x1,x2,...,xn,[SEP],[anchor_1],...,[anchor_n],[SEP],...,[SEP],m1,m2,...,mn
             prompt_src = [tokenizer.cls_token] * prompt_length + src + anchor + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
@@ -230,7 +238,16 @@ def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokeniz
         block_flag = [1] * prompt_length + [0 for _ in src] + [0 for _ in anchor] + [1] * prompt_length + [0 for _ in trg]
     else:
         if mask_src:
-            prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            if mask_mode == "noerror":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st==tt ) else st for st,tt in zip(src,trg)]+ \
+                    [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            elif mask_mode == "error":
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st!=tt ) else st for st,tt in zip(src,trg)]+ \
+                    [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
+            else:
+                assert mask_mode == "all"
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if random.random() < 0.2 else st for st in src]+ \
+                    [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
         else:
             ##[CLS]...[CLS],x1,x2,...,xn,[SEP],...,[SEP],m1,m2,...,mn
             prompt_src = [tokenizer.cls_token] * prompt_length + src + [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
@@ -281,20 +298,6 @@ class Metrics:
 
         return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
 
-
-def mask_tokens(inputs, tokenizer, noise_probability=0.2):
-    inputs = inputs.clone()
-    probability_matrix = torch.full(inputs.shape, noise_probability)
-    special_tokens_mask = [
-        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
-    ]
-    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
-
-    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-    masked_indices = torch.bernoulli(probability_matrix).bool()
-    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-
-    return inputs
 
 
 def main():
@@ -365,6 +368,7 @@ def main():
     parser.add_argument("--mft", action="store_true",
                         help="Training with masked-fine-tuning (not published yet).")
     parser.add_argument("--anchor",type=str,default=None,help="the anchor tokens we add to the prompt.")
+    parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
 
     args = parser.parse_args()
 
@@ -412,7 +416,7 @@ def main():
 
     if args.do_train:
         train_examples = processor.get_train_examples(os.path.join(args.data_dir, task_name), args.train_on)
-        train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer, args.prompt_length, args.mft, anchor=anchor)
+        train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer, args.prompt_length, args.mft, args.mask_mode, anchor=anchor)
 
         all_input_ids = torch.tensor([f.src_ids for f in train_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
@@ -671,8 +675,9 @@ def main():
         all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
         all_label_ids = torch.tensor([f.trg_ids for f in eval_features], dtype=torch.long)
+        all_block_flag = torch.tensor([f.block_flag for f in eval_features], dtype=torch.long)
 
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_label_ids)
+        eval_data = TensorDataset(all_input_ids, all_input_mask, all_label_ids, all_block_flag)
         eval_sampler = SequentialSampler(eval_data)
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
@@ -740,9 +745,9 @@ def main():
                     del mapped_trg[:anchor_length]
                     del mapped_prd[:anchor_length]
                 ## we skip special tokens including '[UNK]'
-                all_inputs += [decode(s)]
-                all_labels += [decode(t)]
-                all_predictions += [decode(p)]
+                all_inputs += [decode(mapped_src)]
+                all_labels += [decode(mapped_trg)]
+                all_predictions += [decode(mapped_prd)]
             eval_steps += 1
 
         eval_loss = eval_loss / eval_steps

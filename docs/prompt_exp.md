@@ -72,9 +72,13 @@ the model evaluated on sighan15 is trained on train_all.txt
 ### train using prompt
 
 ```
+### sighan ###
+
 ############use p-tuning#################
 ## use mft
 CUDA_VISIBLE_DEVICES=0 python run_continuous.py --do_train --do_eval --mft --prompt_length 2 --task_name "ecspell"  --train_on "med"  --eval_on 'med' --save_steps 100 --output_dir "model/model_med" --learning_rate 5e-5 --num_train_epochs 80.0 --train_batch_size 32 --eval_batch_size 64
+
+CUDA_VISIBLE_DEVICES=0 python run_continuous.py --do_test --load_state_dict "model/model_law/step-3500_f1-72.31.bin" --prompt_length 3 --task_name "ecspell"  --test_on "law" --eval_batch_size 64
 ## not use mft
 CUDA_VISIBLE_DEVICES=0 python run_continuous.py --do_train --do_eval --prompt_length 2 --task_name "ecspell"  --train_on "med"  --eval_on 'med' --save_steps 100 --output_dir "model/model_med" --learning_rate 5e-5 --num_train_epochs 80.0 --train_batch_size 32 --eval_batch_size 64
 ## use anchor
@@ -97,8 +101,8 @@ CUDA_VISIBLE_DEVICES=0 python run.py --do_train --do_eval --task_name "sighan"  
 数据集标点规范（，。）
 异常处理
 ########### use chatgpt########################
-python run_chatgpt.py --task_name "ecspell" --test_on "law" --begin 456
-python run_chatgpt.py --task_name "ecspell" --test_on "med"
+python run_chatgpt.py --use_chatgpt --task_name "ecspell" --test_on "law" --begin 456
+python run_chatgpt.py --use_chatgpt  --task_name "ecspell" --test_on "med"
 
 ```
 

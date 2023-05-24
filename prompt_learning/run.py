@@ -29,6 +29,7 @@ class BertForErrorCorrection(BertPreTrainedModel):
         self.num_labels = config.vocab_size
 
         self.bert = BertModel(config, add_pooling_layer=False)
+        ## (num) <=> num (int,float,...)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
@@ -71,7 +72,7 @@ class BertForErrorCorrection(BertPreTrainedModel):
 
         loss = None
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss(ignore_index=0) # ignore padding
+            loss_fct = nn.CrossEntropyLoss(ignore_index=0) # ignore padding, the default value is -100
             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
         if not return_dict:
@@ -245,15 +246,22 @@ class Metrics:
         return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 
-def mask_tokens(inputs, tokenizer, noise_probability=0.2):
+def mask_tokens(inputs, targets, tokenizer, device, mask_mode="noerror", noise_probability=0.2):
+    ## mask_mode in ["all","error","noerror"]
     inputs = inputs.clone()
-    probability_matrix = torch.full(inputs.shape, noise_probability)
+    probability_matrix = torch.full(inputs.shape, noise_probability).to(device)
     special_tokens_mask = [
         tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
     ]
-    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool).to(device)
 
     probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+    if mask_mode == "noerror":
+        probability_matrix.masked_fill_(inputs!=targets, value=0.0)
+    elif mask_mode == "error":
+        probability_matrix.masked_fill_(inputs==targets, value=0.0)
+    else:
+        assert mask_mode == "all"
     masked_indices = torch.bernoulli(probability_matrix).bool()
     inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 
@@ -274,7 +282,7 @@ def main():
                         help="Directory to store the pre-trained language models downloaded from s3.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
-    parser.add_argument("--load_state_dict", type=str, default="",
+    parser.add_argument("--load_checkpoint", type=str, default="",
                         help="Trained model weights to load for evaluation.")
 
     # Training config.
@@ -324,12 +332,14 @@ def main():
                         help="How many steps to save the checkpoint once.")
     parser.add_argument("--mft", action="store_true",
                         help="Training with masked-fine-tuning (not published yet).")
+    parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
 
     args = parser.parse_args()
 
     processors = {
         "sighan": SighanProcessor,
         "ecspell": EcspellProcessor,
+        "sghspell": SighanProcessor,## the data format in sghspell is the same as sighan
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -386,8 +396,8 @@ def main():
                                                        return_dict=True,
                                                        cache_dir=cache_dir)
         model.to(device)
-        if args.load_state_dict:
-            model.load_state_dict(torch.load(args.load_state_dict))
+        if args.load_checkpoint:
+            model.load_state_dict(torch.load(args.load_checkpoint))
         if n_gpu > 1:
             model = torch.nn.DataParallel(model)
 
@@ -446,7 +456,7 @@ def main():
                 batch = tuple(t.to(device) for t in batch)
                 src_ids, attention_mask, trg_ids = batch
                 if args.mft:
-                    src_ids = mask_tokens(src_ids, tokenizer)
+                    src_ids = mask_tokens(src_ids, trg_ids, tokenizer, device, args.mask_mode)## noise probability is 0.2
 
                 if args.fp16:
                     with autocast():
@@ -587,8 +597,8 @@ def main():
                                                        return_dict=True,
                                                        cache_dir=cache_dir)
         model.to(device)
-        if args.load_state_dict:
-            model.load_state_dict(torch.load(args.load_state_dict))
+        if args.load_checkpoint:
+            model.load_state_dict(torch.load(args.load_checkpoint))
         if n_gpu > 1:
             model = torch.nn.DataParallel(model)
 
