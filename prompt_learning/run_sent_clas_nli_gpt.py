@@ -297,7 +297,7 @@ def convert_examples_to_features(examples, label_list, prompt_length, max_seq_le
                 attention_mask += [1]
                 token_type_ids += [0]
                 prompt_mask += [0]
-                output_ids += [tokenizer.convert_tokens_to_ids(pho)]
+                output_ids += [tokenizer.convert_tokens_to_ids(phi)]
             else:
                 attention_mask += [1]
                 token_type_ids += [0]

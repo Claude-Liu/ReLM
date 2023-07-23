@@ -30,10 +30,14 @@ class BertForErrorCorrection(BertPreTrainedModel):
 
         self.bert = BertModel(config, add_pooling_layer=False)
         ## (num) <=> num (int,float,...)
+        '''
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
+        '''
+        
+        #self.generate_linear = nn.Linear(config.hidden_size, self.num_labels)## add
         self.classifier = nn.Linear(config.hidden_size, config.vocab_size)
 
         self.post_init()
@@ -67,8 +71,9 @@ class BertForErrorCorrection(BertPreTrainedModel):
 
         sequence_output = outputs[0]
 
-        sequence_output = self.dropout(sequence_output)
+        #sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
+        #logits = self.generate_linear(sequence_output) ## add
 
         loss = None
         if labels is not None:
@@ -226,7 +231,7 @@ class Metrics:
                 if p == s:
                     fn_sents.append(difference(s, t))
                 if (p!=t and p!=s):
-                    wp_sents.append(difference(s,t))
+                    wp_sents.append(difference(s,p))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
@@ -266,6 +271,23 @@ def mask_tokens(inputs, targets, tokenizer, device, mask_mode="noerror", noise_p
     inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 
     return inputs
+
+def mask_tokens_only_neg(inputs, labels, tokenizer, noise_probability=0.2):
+    inputs = inputs.clone()
+    labels = labels.clone()
+    probability_matrix = torch.full(inputs.shape, noise_probability)
+    special_tokens_mask = [
+        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
+    ]
+    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+    neq_tokens_mask = (inputs != labels).cpu()
+
+    probability_matrix.masked_fill_(special_tokens_mask + neq_tokens_mask, value=0.0)
+    masked_indices = torch.bernoulli(probability_matrix).bool()
+    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+
+    return inputs
+
 
 
 def main():
@@ -414,10 +436,13 @@ def main():
         ]
 
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+        '''
         scheduler = get_scheduler(name=args.lr_scheduler_type,
                                   optimizer=optimizer,
                                   num_warmup_steps=args.max_train_steps * args.warmup_proportion,
                                   num_training_steps=args.max_train_steps)
+        '''
+        
 
         scaler = None
         if args.fp16:
@@ -447,7 +472,7 @@ def main():
         best_result = list()
         wrap = False
         progress_bar = tqdm(range(args.max_train_steps))
-        for _ in range(int(args.num_train_epochs)):
+        for  _ in progress_bar:
             train_loss = 0
             num_train_examples = 0
             if wrap: break
@@ -457,7 +482,7 @@ def main():
                 src_ids, attention_mask, trg_ids = batch
                 if args.mft:
                     src_ids = mask_tokens(src_ids, trg_ids, tokenizer, device, args.mask_mode)## noise probability is 0.2
-
+                    #src_ids = mask_tokens_only_neg(src_ids, trg_ids, tokenizer)
                 if args.fp16:
                     with autocast():
                         outputs = model(input_ids=src_ids,
@@ -488,7 +513,7 @@ def main():
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
-                    scheduler.step()
+                    #scheduler.step()
                     global_step += 1
                     progress_bar.update(1)
 

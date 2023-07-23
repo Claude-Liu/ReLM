@@ -19,10 +19,10 @@ sighan15(1) fine-tuned on train_all.txt
 
 sighan15(2) fine-tuned on train_hybrid.txt and train_all.txt
 
-|                        | CPT（l=3） | CPT+MLM(l=3) | FT    | MFT       | chatGPT |
+|                        | CPT（l=3） | CPT+mft(l=3) | FT    | MFT       | chatGPT |
 | ---------------------- | ---------- | ------------ | ----- | --------- | ------- |
 | law                    | **55.51**  | **72.31**    | 37.87 | 66.27     | 34.82   |
-| med                    | **60.03**  | **71.53**    | 22.34 | 53.11     | 19.12   |
+| med                    | **56.89**  | **71.53**    | 22.34 | 53.11     |         |
 | sighan15 (1)           | **51.95**  | 52.51        | 43.37 | **52.63** |         |
 | sighan15 (2)           |            |              |       |           |         |
 | sghspell (random)      |            |              |       |           |         |
@@ -100,9 +100,12 @@ CUDA_VISIBLE_DEVICES=0 python run.py --do_train --do_eval --task_name "sighan"  
 #####
 数据集标点规范（，。）
 异常处理
-########### use chatgpt########################
-python run_chatgpt.py --use_chatgpt --task_name "ecspell" --test_on "law" --begin 456
-python run_chatgpt.py --use_chatgpt  --task_name "ecspell" --test_on "med"
+########### use 
+chatgpt########################
+python run_chatgpt.py --use_chatgpt --task_name "sighan" --test_on "15" --message_file "model/message_sighan15.json"
+python run_chatgpt.py --use_chatgpt --task_name "ecspell" --test_on "law" --message_file "model/message_law.json"
+python run_chatgpt.py --use_chatgpt  --task_name "ecspell" --test_on "med" --message_file "model/message_med.json"
+python run_chatgpt.py --use_chatgpt  --task_name "ecspell" --test_on "odw"
 
 ```
 

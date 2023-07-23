@@ -57,7 +57,7 @@ class PTuningWrapper(nn.Module):
         self.model_type = self.config.model_type.split("-")[0]
         self.word_embeddings = getattr(self.model, self.model_type).embeddings.word_embeddings
         
-        # pronpt embedding for afqmc
+        # prompt embedding for afqmc
         self.prompt_embeddings_afqmc = nn.Embedding(self.prompt_length_sent, self.config.hidden_size)
         self.prompt_lstm_afqmc = nn.LSTM(input_size=self.config.hidden_size,
                                          hidden_size=self.config.hidden_size,
@@ -357,6 +357,8 @@ def main():
     parser.add_argument("--freeze_lm", action="store_true",
                         help="Whether to keep LM parameters frozen.")
 
+    parser.add_argument("--print_para_names", action="store_true", help="only print the parameters' names and do not train" )
+
     args = parser.parse_args()
 
     processors_all = {
@@ -510,6 +512,14 @@ def main():
                                   num_warmup_steps=args.max_train_steps * args.warmup_proportion,
                                   num_training_steps=args.max_train_steps)
         #######################################################################
+        if args.print_para_names:
+            prompt_params = ["prompt_"]
+            for n, p in model.named_parameters():
+                if not any(nd in n for nd in prompt_params):  # why not nd==n
+                    p.requires_grad = False
+                print(n,'\n', p.requires_grad)
+            return
+
         if args.freeze_lm:  # freeze the parameters in the lm except prompt parameters
             prompt_params = ["prompt_"]
             for n, p in model.named_parameters():

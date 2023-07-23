@@ -239,7 +239,7 @@ def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokeniz
     else:
         if mask_src:
             if mask_mode == "noerror":
-                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st==tt ) else st for st,tt in zip(src,trg)]+ \
+                prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if ( random.random() < 0.2 and st==tt ) else st for st,tt in zip(src,trg)]+ \
                     [tokenizer.sep_token] * prompt_length + [tokenizer.mask_token for _ in trg]
             elif mask_mode == "error":
                 prompt_src = [tokenizer.cls_token] * prompt_length + [tokenizer.mask_token if (random.random() < 0.2 and st!=tt ) else st for st,tt in zip(src,trg)]+ \
@@ -268,18 +268,18 @@ class Metrics:
 
             return "".join(ret)
 
-        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents  = [], [], [], [], [], [], [], []
-        ## wp_sents are the positive examples corrected in a wrong way (s!=t&p!=t&p!=s)
+        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents = [], [], [], [], [], [], [], []
         for s, t, p in zip(src_sents, trg_sents, prd_sents):
             # For positive examples
             if s != t:
                 pos_sents.append(difference(s, t))
+                #print(difference(s, t))
                 if p == t:
                     tp_sents.append(difference(s, t))
                 if p == s:
                     fn_sents.append(difference(s, t))
                 if (p!=t and p!=s):
-                    wp_sents.append(difference(s,t))
+                    wp_sents.append(difference(s,p))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
@@ -290,13 +290,19 @@ class Metrics:
                 prd_pos_sents.append(difference(s, p))
             if s == p:
                 prd_neg_sents.append(difference(s, p))
-
-        p = 1.0 * len(tp_sents) / len(prd_pos_sents)
-        r = 1.0 * len(tp_sents) / len(pos_sents)
-        f1 = 2.0 * (p * r) / (p + r + 1e-12)
+        if len(pos_sents)==0:
+            p=0
+            r=0
+            f1=0
+            wpr=0
+        else:
+            p = 1.0 * len(tp_sents) / len(prd_pos_sents)
+            r = 1.0 * len(tp_sents) / len(pos_sents)
+            f1 = 2.0 * (p * r) / (p + r + 1e-12)
+            wpr = 1.0 * len(wp_sents) / len(pos_sents)
         fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
 
-        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
+        return p, r, f1, fpr, wpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 
 
@@ -458,13 +464,18 @@ def main():
         ]
         ## set the Adam optimizer
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+        
         scheduler = get_scheduler(name=args.lr_scheduler_type,
                                   optimizer=optimizer,
                                   num_warmup_steps=args.max_train_steps * args.warmup_proportion,
                                   num_training_steps=args.max_train_steps)
+        
+        
+        
+        
         #######################################################################
         if args.freeze_lm:##freeze the parameters in the lm except prompt parameters
-            prompt_params = ["prompt_embeddings", "lstm_head", "mlp_head"]
+            prompt_params = ["prompt_embeddings", "prompt_lstm", "prompt_linear"]
             for n, p in model.named_parameters():
                 if not any(nd in n for nd in prompt_params):##why not nd==n
                     p.requires_grad = False
@@ -613,7 +624,7 @@ def main():
     
                     loss = train_loss / global_step
                     eval_loss = eval_loss / eval_steps
-                    p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
+                    p, r, f1, fpr, wpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
     
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
                     with open(output_tp_file, "w") as writer:
@@ -748,10 +759,16 @@ def main():
                 all_inputs += [decode(mapped_src)]
                 all_labels += [decode(mapped_trg)]
                 all_predictions += [decode(mapped_prd)]
+                '''
+                print(all_inputs[-1])
+                print(all_labels[-1])
+                print(all_predictions[-1])
+                print("--------------------\n")
+                '''
             eval_steps += 1
 
         eval_loss = eval_loss / eval_steps
-        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
+        p, r, f1, fpr, wpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
@@ -776,6 +793,7 @@ def main():
             "eval_r": r * 100,
             "eval_f1": f1 * 100,
             "eval_fpr": fpr * 100,
+            "eval_wpr": wpr*100,
         }
 
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")

@@ -4,6 +4,7 @@ import argparse
 import openai
 import copy
 import logging
+import time
 from tqdm import *
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -182,7 +183,7 @@ def main():
     parser.add_argument("--use_chatgpt",action="store_true")
     parser.add_argument("--load_messages",action="store_true")
     parser.add_argument("--key_file",type=str,default="../envs/openai_key",help="the file containing the api key")
-    parser.add_argument("--message_file",type=str,default="model/messages_med.json",help="the file to store the chat messages")
+    parser.add_argument("--message_file",type=str,default="model/messages_odw.json",help="the file to store the chat messages")
     parser.add_argument("--data_dir", type=str, default="../data/csc/",
                         help="Directory to contain the input data for all tasks.")
     parser.add_argument("--task_name", type=str, default="ecspell",
@@ -214,22 +215,23 @@ def main():
         all_trgs=[]
         messages=[]
         for i,example in enumerate(tqdm(test_examples,desc="Test")):
-            if args.begin is not None and i<args.begin:
-                continue
-            try:
-                src=example.src##[t1,t2,...,tn]
-                trg=example.trg
-                prediction=chat.gptCorrect("".join(src))
-                if i%100 == 0 or (i%10==0 and i<100):
-                    logger.info("src: %s \n prediction: %s", "".join(src),prediction)
-                all_preds.append(list(prediction))
-                all_srcs.append(src)
-                all_trgs.append(trg)
-                messages.append({"src":"".join(src),"trg":"".join(trg), "pred":prediction})
-            except:
-                with open(args.message_file, 'w', encoding='utf-8') as f:
-                    json.dump(messages,f, ensure_ascii=False,indent=4)
-                raise
+            while(1):
+                if args.begin is not None and i<args.begin:
+                    continue
+                try:
+                    src=example.src##[t1,t2,...,tn]
+                    trg=example.trg
+                    prediction=chat.gptCorrect("".join(src))
+                    if i%100 == 0 or (i%10==0 and i<100):
+                        logger.info("src: %s \n prediction: %s", "".join(src),prediction)
+                    all_preds.append(list(prediction))
+                    all_srcs.append(src)
+                    all_trgs.append(trg)
+                    messages.append({"src":"".join(src),"trg":"".join(trg), "pred":prediction})
+                    break
+                except:
+                    time.sleep(5)
+                    continue
         with open(args.message_file, 'w', encoding='utf-8') as f:
             json.dump(messages,f, ensure_ascii=False,indent=4)
     else:
