@@ -278,6 +278,32 @@ class Metrics:
 
         return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
 
+def mask_tokens(inputs, targets, task_ids, tokenizer, device, mask_mode="noerror", noise_probability=0.2):
+    ## mask_mode in ["all","error","noerror"]
+    inputs = inputs.clone()
+    probability_matrix = torch.full(inputs.shape, noise_probability).to(device)
+
+    inputs_shape = inputs.size()
+    csc_task_matrix = torch.ones(inputs_shape).to(device)
+    task_ids_expand=task_ids.unsqueeze(dim=-1).expand(inputs_shape)
+    probability_matrix.masked_fill_(task_ids_expand!=csc_task_matrix, value=0.0)
+    special_tokens_mask = [
+        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
+    ]
+    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool).to(device)
+
+    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+    if mask_mode == "noerror":
+        probability_matrix.masked_fill_(inputs!=targets, value=0.0)
+    elif mask_mode == "error":
+        probability_matrix.masked_fill_(inputs==targets, value=0.0)
+    else:
+        assert mask_mode == "all"
+    masked_indices = torch.bernoulli(probability_matrix).bool()
+    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+
+    return inputs
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -348,6 +374,7 @@ def main():
     parser.add_argument("--mft", action="store_true",
                         help="Training with masked-fine-tuning (not published yet).")
     parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
+    parser.add_argument("--mask_rate", type=float, default=0.2, help="the percentage we mask the source sentence in mask-ft technique")
 
     parser.add_argument("--csc_prompt_length", type=int,
                         default=3, help="the length of the continuous prompt")
@@ -435,7 +462,7 @@ def main():
             train_examples += train_examples_
             if task_name in task_class["csc"]:
                 train_features += csc_convert_examples_to_features(train_examples_, max_seq_length_csc, tokenizer,
-                                                                   args.csc_prompt_length, args.mft, args.mask_mode, anchor)
+                                                                   args.csc_prompt_length,  anchor=anchor) ## no static mask
             else:
                 assert(task_name in task_class["seq"])
                 label_list = processor.get_labels()
@@ -455,12 +482,13 @@ def main():
         # token_type_ids
         all_input_segment = torch.tensor([f.token_type_ids for f in train_features], dtype=torch.long)
         all_label_ids = torch.tensor([f.label_ids for f in train_features], dtype=torch.long)  # (batch,seq)
+        all_trg_ref_ids = torch.tensor([f.trg_ref_ids for f in train_features], dtype=torch.long)  # (batch,seq)
         all_task_ids = torch.tensor([f.task_id for f in train_features], dtype=torch.long)
         all_prompt_mask = torch.tensor([f.prompt_mask for f in train_features], dtype=torch.long)
         all_active_bits = torch.tensor([f.active_bits for f in train_features], dtype=torch.long)
 
         train_data = TensorDataset(all_input_ids, all_input_mask, all_input_segment,
-                                   all_label_ids, all_task_ids, all_prompt_mask, all_active_bits)
+                                   all_label_ids, all_trg_ref_ids, all_task_ids, all_prompt_mask, all_active_bits)
         # we have to disrupt the order the features from different tasks
         train_sampler = RandomSampler(train_data)
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
@@ -540,7 +568,7 @@ def main():
 
             if task_name in task_class["csc"]:
                 eval_features = csc_convert_examples_to_features(eval_examples, max_seq_length_csc, tokenizer,
-                                                                   args.csc_prompt_length, anchor)
+                                                                   args.csc_prompt_length, anchor=anchor)
             else:
                 assert(task_name in task_class["seq"])
                 label_list = processor.get_labels()
@@ -587,7 +615,15 @@ def main():
             for step, batch in enumerate(train_dataloader):
                 model.train()
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_mask, input_segment,label_ids, task_ids, prompt_mask, active_bits = batch
+                input_ids, input_mask, input_segment,label_ids, trg_ref_ids, task_ids, prompt_mask, active_bits = batch
+                '''
+                print("size of input_ids:{}".format(input_ids.size()))
+                print("size of task_ids:{}".format(task_ids.size()))
+                print("size of label_ids:{}".format(label_ids.size()))
+                '''
+
+                if args.mft:
+                    input_ids = mask_tokens(input_ids, trg_ref_ids, task_ids, tokenizer, device, mask_mode=args.mask_mode, noise_probability=args.mask_rate)
 
                 if args.fp16:
                     with autocast():
@@ -789,7 +825,7 @@ def main():
 
         if task_name in task_class["csc"]:
             eval_features = csc_convert_examples_to_features(eval_examples, max_seq_length_csc, tokenizer,
-                                                                args.csc_prompt_length, anchor)
+                                                                args.csc_prompt_length, anchor=anchor)
         else:
             assert(task_name in task_class["seq"])
             label_list = processor.get_labels()
