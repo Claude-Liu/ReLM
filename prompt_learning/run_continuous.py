@@ -332,6 +332,7 @@ def dynamic_mask_token(inputs, targets, tokenizer, device, mask_mode="noerror", 
     if mask_mode == "noerror":
         probability_matrix.masked_fill_(inputs!=targets, value=0.0)
     elif mask_mode == "error":
+        
         probability_matrix.masked_fill_(inputs==targets, value=0.0)
     else:
         assert mask_mode == "all"
@@ -500,13 +501,11 @@ def main():
         ]
         ## set the Adam optimizer
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-        
+    
         scheduler = get_scheduler(name=args.lr_scheduler_type,
                                   optimizer=optimizer,
                                   num_warmup_steps=args.max_train_steps * args.warmup_proportion,
                                   num_training_steps=args.max_train_steps)
-        
-        
         
         
         #######################################################################

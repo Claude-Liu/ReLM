@@ -107,5 +107,8 @@ python run_chatgpt.py --use_chatgpt --task_name "ecspell" --test_on "law" --mess
 python run_chatgpt.py --use_chatgpt  --task_name "ecspell" --test_on "med" --message_file "model/message_med.json"
 python run_chatgpt.py --use_chatgpt  --task_name "ecspell" --test_on "odw"
 
+python run_chatgpt.py --load_message --task_name "ecspell" --test_on "law" --message_file "model/messages_law.json"
+python run_chatgpt.py --load_message --task_name "ecspell" --test_on "med" --message_file "model/message_med.json"
+python run_chatgpt.py --load_message --task_name "ecspell" --test_on "odw" --message_file "model/messages_odw.json"
 ```
 

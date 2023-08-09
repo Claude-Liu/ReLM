@@ -1,18 +1,21 @@
 from __future__ import absolute_import, division, print_function
 import argparse
+import json
 import logging
 import os
 import random
-import math
 import copy
+import math
 import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
-from tqdm.auto import tqdm
-from transformers import AutoTokenizer
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset, SubsetRandomSampler
+import sklearn.metrics as mtc
+from scipy.stats import spearmanr
+from tqdm import tqdm, trange
+from transformers import AutoTokenizer, GPT2LMHeadModel
 from transformers import SchedulerType, get_scheduler
-from transformers import BertForMaskedLM
+#from peft import get_peft_model, LoraConfig, TaskType, PeftModel
+from accelerate import Accelerator
 
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -20,53 +23,24 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+'''
+with open("data/database.json") as f:
+    db = json.load(f)
+'''
 
 class InputExample(object):
-    def __init__(self, guid, src, trg):
+    def __init__(self, guid, context=None, source=None, target=None):
         self.guid = guid
-        self.src = src
-        self.trg = trg
+        self.context = context
+        self.source = source
+        self.target = target
 
 
 class InputFeatures(object):
-    def __init__(self, src_ids, attention_mask,token_type_ids, trg_ids, trg_ref_ids):
-        self.src_ids = src_ids
+    def __init__(self, input_ids, attention_mask, labels):
+        self.input_ids = input_ids
         self.attention_mask = attention_mask
-        self.token_type_ids = token_type_ids
-        self.trg_ids = trg_ids
-        self.trg_ref_ids = trg_ref_ids
-
-
-class SighanProcessor:
-    """Processor for the Sighan data set."""
-
-    def get_train_examples(self, data_dir, division="all"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "train_{}.txt".format(division))), "train")
-
-    def get_dev_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "dev")
-
-    def get_test_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
-
-    @staticmethod
-    def _read_csv(input_file):
-        with open(input_file, "r", encoding="utf-8") as f:
-            lines = []
-            for line in f:
-                src, trg = line.strip().split("\t")
-                lines.append((src.split(), trg.split()))
-            return lines
-
-    @staticmethod
-    def _create_examples(lines, set_type):
-        examples = []
-        for i, (src, trg) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            if len(src) == len(trg):
-                examples.append(InputExample(guid=guid, src=src, trg=trg))
-        return examples
-
+        self.labels = labels
 
 class EcspellProcessor:
     """Processor for the ECSpell data set."""
@@ -96,103 +70,67 @@ class EcspellProcessor:
             guid = "%s-%s" % (set_type, i)
             if len(src) == len(trg):
                 if len(src) == len(trg):
-                    examples.append(InputExample(guid=guid, src=src, trg=trg))
+                    examples.append(InputExample(guid=guid, source=src, target=trg))
         return examples
+    
 
-
-def convert_examples_to_features(examples, max_seq_length, tokenizer, static_mask=False):
+def convert_examples_to_features(examples, max_seq_length, tokenizer):
     features = []
+    max_length=max_seq_length//2-2
+    def truncate(x, max_length):
+        return x[: max_length]
     for i, example in enumerate(examples):
-        src, trg, trg_ref = convert_examples_to_prompts(example.src, example.trg, max_seq_length // 2, tokenizer, static_mask)
-        example.src = src
-        example.trg = trg
-        encoded_inputs = tokenizer(example.src,
-                                   max_length=max_seq_length,
-                                   padding="max_length",
-                                   truncation=True,
-                                   is_split_into_words=True)
-        src_ids = encoded_inputs["input_ids"]
-        attention_mask = encoded_inputs["attention_mask"]
-        token_type_ids = encoded_inputs["token_type_ids"]
-        trg_ids = tokenizer(example.trg,
-                            max_length=max_seq_length,
-                            padding="max_length",
-                            truncation=True,
-                            is_split_into_words=True)["input_ids"]
-        trg_ref_ids = tokenizer(trg_ref,
-                            max_length=max_seq_length,
-                            padding="max_length",
-                            truncation=True,
-                            return_token_type_ids=True,
-                            is_split_into_words=True)["input_ids"]
+        #truncate the source and the target
+        example.source = truncate(example.source,max_length)
+        example.target = truncate(example.target,max_length)
 
-        assert len(src_ids) == max_seq_length
+        encoded_inputs = tokenizer(example.source, add_special_tokens=True ,is_split_into_words=True)
+        #encoded_inputs['input_ids']=[tokenizer.cls_token_id]+encoded_inputs['input_ids']
+        encoded_inputs["labels"] = [-100] * len(encoded_inputs["input_ids"])
+
+        trg_ids= tokenizer(example.target, add_special_tokens=False, is_split_into_words=True)["input_ids"] + [tokenizer.eos_token_id]
+        encoded_inputs["input_ids"] += trg_ids
+        encoded_inputs["labels"] += trg_ids
+        encoded_inputs["attention_mask"] = [1] * len(encoded_inputs["input_ids"])
+    
+        offset_length = max_seq_length - len(encoded_inputs["input_ids"])
+        # pad right
+        encoded_inputs["input_ids"] = encoded_inputs["input_ids"] + [tokenizer.pad_token_id] * offset_length
+        encoded_inputs["attention_mask"] = encoded_inputs["attention_mask"] + [0] * offset_length
+        encoded_inputs["labels"] =  encoded_inputs["labels"] + [-100] * offset_length
+        
+        input_ids = encoded_inputs["input_ids"]
+        attention_mask = encoded_inputs["attention_mask"]
+        labels = encoded_inputs["labels"]
+        tokens = tokenizer.convert_ids_to_tokens(input_ids)
+
+        assert len(input_ids) == max_seq_length
         assert len(attention_mask) == max_seq_length
-        assert len(trg_ids) == max_seq_length
+        assert len(labels) == max_seq_length
 
         if i < 5:
             logger.info("*** Example ***")
             logger.info("guid: %s" % example.guid)
-            logger.info("src_tokens: %s" % " ".join(example.src))
-            logger.info("trg_tokens: %s" % " ".join(example.trg))
-            logger.info("src_ids: %s" % " ".join([str(x) for x in src_ids]))
-            logger.info("trg_ids: %s" % " ".join([str(x) for x in trg_ids]))
+            logger.info("tokens: %s" % " ".join(tokens))
+            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
             logger.info("attention_mask: %s" % " ".join([str(x) for x in attention_mask]))
+            logger.info("labels: %s" % " ".join([str(x) for x in labels]))
 
+        '''
+        input_ids: cls + src + sep + trg + sep +pad
+        labels:   ...-100...       + trg + sep +pad
+        '''
         features.append(
-                InputFeatures(src_ids=src_ids,
-                              attention_mask=attention_mask,
-                              token_type_ids=token_type_ids,
-                              trg_ids=trg_ids,
-                              trg_ref_ids=trg_ref_ids)
+            InputFeatures(input_ids=input_ids,
+                          attention_mask=attention_mask,
+                          labels=labels)
         )
+
     return features
-
-
-def convert_examples_to_prompts(src, trg, max_seq_length, tokenizer, static_mask=False):
-    def truncate(x, max_length):
-        return x[: max_length]
-
-    src = truncate(src, max_seq_length-1)
-    trg = truncate(trg, max_seq_length-1)
-    if static_mask:
-        prompt_src = [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + [tokenizer.sep_token] + [tokenizer.mask_token for _ in trg]
-    else:
-        ##src+[SEP]+[MASK]...
-        prompt_src = src + [tokenizer.sep_token] + [tokenizer.mask_token for _ in trg]
-    ## src+[SEP]+trg
-    prompt_trg = src + [tokenizer.sep_token] + trg
-    trg_ref = trg + [tokenizer.sep_token] + trg
-
-    return prompt_src, prompt_trg, trg_ref
-
-def dynamic_mask_token(inputs, targets, tokenizer, device, mask_mode="noerror", noise_probability=0.2):
-    #src:[CLS]...[CLS],x1,x2,...,xn,[SEP],...,[SEP],m1,m2,...,mn
-    #trg:[CLS]...[CLS],t1,t2,...,tn,[SEP],...,[SEP],t1,t2,...,tn
-    ## mask_mode in ["all","error","noerror"]
-    inputs = inputs.clone()
-    probability_matrix = torch.full(inputs.shape, noise_probability).to(device)
-    #do not mask sepcail tokens
-    special_tokens_mask = [
-        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
-    ]
-    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool).to(device)
-
-    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-    if mask_mode == "noerror":
-        probability_matrix.masked_fill_(inputs!=targets, value=0.0)
-    elif mask_mode == "error":
-        probability_matrix.masked_fill_(inputs==targets, value=0.0)
-    else:
-        assert mask_mode == "all"
-    masked_indices = torch.bernoulli(probability_matrix).bool()
-    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-
-    return inputs
 
 class Metrics:
     @staticmethod
-    def compute(src_sents, trg_sents, prd_sents):
+    def compute(src_sents, trg_sents, prd_sents,tokenizer=None):
         def difference(src, trg):
             ret = copy.deepcopy(src)
             for i, (src_char, trg_char) in enumerate(zip(src, trg)):
@@ -200,9 +138,14 @@ class Metrics:
                     ret[i] = "(" + src_char + "->" + trg_char + ")"
 
             return "".join(ret)
-
+        def decode(x):
+                        return tokenizer.convert_ids_to_tokens(x, skip_special_tokens=True)
         pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents = [], [], [], [], [], [], [], []
         for s, t, p in zip(src_sents, trg_sents, prd_sents):
+            if tokenizer is not None:
+                s = decode(s)
+                t = decode(t)
+                p = decode(p)
             # For positive examples
             if s != t:
                 pos_sents.append(difference(s, t))
@@ -229,40 +172,55 @@ class Metrics:
         fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
 
         return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
+    
+def dynamic_mask_token(inputs, targets, tokenizer, device, noise_probability=0.2):
+    #src:[CLS],x1,x2,...,xn,[SEP],y1,y2,y3 [SEP]
+    #trg:-100 , ... -100, -100 ,  y1,y2,y3 [SEP]
+    ## mask_mode in ["all","error","noerror"]
+    inputs = inputs.clone()
+    probability_matrix = torch.full(inputs.shape, noise_probability).to(device)
+    #do not mask sepcail tokens
+    special_tokens_mask = [
+        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
+    ]
+    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool).to(device)
+    ## do not mask target part
+    probability_matrix.masked_fill_(inputs==targets, value=0.0)
+    
+    masked_indices = torch.bernoulli(probability_matrix).bool()
+    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 
-
+    return inputs
 def main():
     parser = argparse.ArgumentParser()
 
-    # Data config.
+    # Data config
     parser.add_argument("--data_dir", type=str, default="data/",
                         help="Directory to contain the input data for all tasks.")
     parser.add_argument("--task_name", type=str, default="SIGHAN",
                         help="Name of the training task.")
-    parser.add_argument("--load_model_path", type=str, default="bert-base-chinese",
-                        help="Pre-trained model path to load if needed.")
+    parser.add_argument("--load_model_path", type=str, default="uer/gpt2-chinese-cluecorpussmall",
+                        help="Pre-trained language model to load.")
+    parser.add_argument("--load_tokenizer_path", type=str, default="bert-base-uncased",
+                        help="Pre-trained tokenizer to load.")
     parser.add_argument("--cache_dir", type=str, default="../cache/",
                         help="Directory to store the pre-trained language models downloaded from s3.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
     parser.add_argument("--load_state_dict", type=str, default="",
-                        help="Trained model weights to load for evaluation.")
+                        help="Checkpoint to load for trianing or evaluation.")
 
-    # Training config.
+    # Training config
     parser.add_argument("--do_train", action="store_true",
                         help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true",
                         help="Whether to evaluate on the dev set.")
     parser.add_argument("--do_test", action="store_true",
                         help="Whether to evaluate on the test set.")
-    parser.add_argument("--train_on", type=str, default="all",
+    parser.add_argument("--train_on", type=str, default="",
                         help="Choose a training set.")
-    parser.add_argument("--eval_on", type=str, default="15",
+    parser.add_argument("--eval_on", type=str, default="",
                         help="Choose a dev set.")
-    parser.add_argument("--test_on", type=str, default="15",
-                        help="Choose a test set.")
-    parser.add_argument("--use_slow_tokenizer", action="store_true",
-                        help="A slow tokenizer will be used if passed.")
     parser.add_argument("--do_lower_case", action="store_true",
                         help="Set this flag if you are using an uncased model.")
     parser.add_argument("--max_seq_length", type=int, default=128,
@@ -271,17 +229,17 @@ def main():
                         help="Total batch size for training.")
     parser.add_argument("--eval_batch_size", type=int, default=256,
                         help="Total batch size for evaluation.")
-    parser.add_argument("--learning_rate", type=float, default=5e-5,
-                        help="Initial learning rate for Adam.")
+    parser.add_argument("--learning_rate", type=float, default=3e-5,
+                        help="Peak learning rate for optimization.")
     parser.add_argument("--num_train_epochs", type=float, default=3.0,
                         help="Total number of training epochs to perform.")
     parser.add_argument("--max_train_steps", type=int, default=None,
-                        help="Total number of training steps to perform. If provided, overrides training epochs.")
+                        help="Total number of training steps to perform (overrides training epochs).")
     parser.add_argument("--lr_scheduler_type", type=SchedulerType, default="linear",
                         help="Scheduler type for learning rate warmup.")
-    parser.add_argument("--warmup_proportion", type=float, default=0.1,
+    parser.add_argument("--warmup_proportion", type=float, default=0.06,
                         help="Proportion of training to perform learning rate warmup for.")
-    parser.add_argument("--weight_decay", type=float, default=0.,
+    parser.add_argument("--weight_decay", type=float, default=0.01,
                         help="L2 weight decay for training.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward pass.")
@@ -291,8 +249,13 @@ def main():
                         help="Whether to use mixed precision.")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for initialization.")
+    parser.add_argument("--lora", action="store_true",
+                        help="Whether to use low rank adaption.")
+    parser.add_argument("--doask", action="store_true",
+                        help="Whether to augment the training data.")
     parser.add_argument("--save_steps", type=int, default=100,
                         help="How many steps to save the checkpoint once.")
+    
     parser.add_argument("--mft", action="store_true",
                         help="Training with masked-fine-tuning (not published yet).")
     parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
@@ -300,15 +263,10 @@ def main():
 
     args = parser.parse_args()
 
-    processors = {
-        "sighan": SighanProcessor,
-        "ecspell": EcspellProcessor,
-    }
-
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     n_gpu = torch.cuda.device_count()
     logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
-        device, n_gpu, "Unsupported", args.fp16))
+        device, n_gpu, "-accelerate", args.fp16))
 
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
@@ -324,31 +282,32 @@ def main():
     if args.do_train:
         torch.save(args, os.path.join(args.output_dir, "train_args.bin"))
 
-    task_name = args.task_name.lower()
-    if task_name not in processors:
-        raise ValueError("Task not found: %s" % task_name)
-
-    processor = processors[task_name]()
+    processor = EcspellProcessor()
 
     cache_dir = args.cache_dir
-    tokenizer = AutoTokenizer.from_pretrained(args.load_model_path,
+    tokenizer = AutoTokenizer.from_pretrained(args.load_tokenizer_path,
                                               do_lower_case=args.do_lower_case,
-                                              cache_dir=cache_dir,
-                                              use_fast=not args.use_slow_tokenizer)
+                                              padding_side="left",
+                                              cache_dir=cache_dir)
+    if getattr(tokenizer, "pad_token_id") is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    # we use BERTtokenizer as tokenizer for chinese
+    if getattr(tokenizer, "eos_token_id") is None:
+        tokenizer.eos_token_id = tokenizer.sep_token_id
+
+    logger.info("tokenizer.eos_token_id: %d", tokenizer.eos_token_id)
+    task_name = args.task_name.lower()
 
     if args.do_train:
         train_examples = processor.get_train_examples(os.path.join(args.data_dir, task_name), args.train_on)
         train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer)
 
-        all_input_ids = torch.tensor([f.src_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
-        all_input_segment = torch.tensor([f.token_type_ids for f in train_features], dtype=torch.long)
-        all_label_ids = torch.tensor([f.trg_ids for f in train_features], dtype=torch.long)
-        all_trg_ref_ids = torch.tensor([f.trg_ref_ids for f in train_features], dtype=torch.long)
+        all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
+        all_attention_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
+        all_labels = torch.tensor([f.labels for f in train_features], dtype=torch.long)
 
-        train_data = TensorDataset(all_input_ids, all_input_mask,all_input_segment, all_label_ids, all_trg_ref_ids)
-        train_sampler = RandomSampler(train_data)
-        train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
+        train_data = TensorDataset(all_input_ids, all_attention_mask, all_labels)
+        train_dataloader = DataLoader(train_data, shuffle=True, batch_size=args.train_batch_size)
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         if args.max_train_steps is None:
@@ -356,14 +315,22 @@ def main():
         else:
             args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-        model = BertForMaskedLM.from_pretrained(args.load_model_path,
-                                                return_dict=True,
-                                                cache_dir=cache_dir)
-        model.to(device)
-        if args.load_state_dict:
-            model.load_state_dict(torch.load(args.load_state_dict))
-        if n_gpu > 1:
-            model = torch.nn.DataParallel(model)
+        accelerator = Accelerator(cpu=args.no_cuda, mixed_precision="fp16" if args.fp16 else "no")
+        device = accelerator.device
+
+        model = GPT2LMHeadModel.from_pretrained(args.load_model_path,
+                                                     cache_dir=cache_dir)
+        
+        '''
+        if args.lora:
+            if args.load_ckpt:
+                model = PeftModel.from_pretrained(model, args.load_ckpt, is_trainable=True)
+            else:
+                peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, r=8, lora_alpha=32, lora_dropout=0.1)
+                model = get_peft_model(model, peft_config)
+                model.print_trainable_parameters()
+        '''
+        
 
         no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
@@ -383,137 +350,139 @@ def main():
                                   num_warmup_steps=args.max_train_steps * args.warmup_proportion,
                                   num_training_steps=args.max_train_steps)
 
-        scaler = None
-        if args.fp16:
-            from torch.cuda.amp import autocast, GradScaler
-
-            scaler = GradScaler()
-        
         if args.do_eval:
             eval_examples = processor.get_dev_examples(os.path.join(args.data_dir, task_name), args.eval_on)
             eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer)
 
-            all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
-            all_input_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
-            all_input_segment = torch.tensor([f.token_type_ids for f in eval_features], dtype=torch.long)
-            all_label_ids = torch.tensor([f.trg_ids for f in eval_features], dtype=torch.long)
+            all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+            all_attention_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
+            all_labels = torch.tensor([f.labels for f in eval_features], dtype=torch.long)
 
-            eval_data = TensorDataset(all_input_ids, all_input_mask, all_input_segment, all_label_ids)
-            eval_sampler = SequentialSampler(eval_data)
-            eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+            eval_data = TensorDataset(all_input_ids, all_attention_mask, all_labels)
+            eval_dataloader = DataLoader(eval_data, shuffle=False, batch_size=args.eval_batch_size)
 
-    if args.do_train:
+        model, optimizer, scheduler, train_dataloader = accelerator.prepare(model, optimizer, scheduler, train_dataloader)
+
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", args.max_train_steps)
 
         global_step = 0
+        best_epoch = 0
         best_result = list()
-        wrap = False
         progress_bar = tqdm(range(args.max_train_steps))
-        for _ in range(int(args.num_train_epochs)):
+        for epoch in range(int(args.num_train_epochs)):
+            model.train()
             train_loss = 0
             num_train_examples = 0
-            if wrap: break
+            train_steps = 0
             for step, batch in enumerate(train_dataloader):
-                model.train()
                 batch = tuple(t.to(device) for t in batch)
-                src_ids, attention_mask,token_type_ids, trg_ids, trg_ref_ids = batch
+                input_ids, attention_mask, labels = batch
                 if args.mft:
-                    src_ids = dynamic_mask_token(src_ids, trg_ref_ids, tokenizer, device, mask_mode=args.mask_mode, noise_probability=args.mask_rate)
-                trg_ids[(src_ids == trg_ids)] = -100
+                    input_ids = dynamic_mask_token(input_ids, labels, tokenizer, device, noise_probability=args.mask_rate)
+                #print("size of input_ids:{}".format(input_ids.size()))
+                #print("size of label_ids:{}".format(labels.size()))
+                    if step<3:
+                        print("input_ids: {}".format(input_ids[0]))
+                        print("input_tokens: {}".format(tokenizer.convert_ids_to_tokens(input_ids[0])))
 
-                if args.fp16:
-                    with autocast():
-                        outputs = model(input_ids=src_ids,
-                                        attention_mask=attention_mask,
-                                        token_type_ids=token_type_ids,
-                                        labels=trg_ids)
-                else:
-                    outputs = model(input_ids=src_ids,
-                                    attention_mask=attention_mask,
-                                    labels=trg_ids)
+                outputs = model(input_ids=input_ids,
+                                attention_mask=attention_mask,
+                                labels=labels)
                 loss = outputs.loss
 
                 if n_gpu > 1:
                     loss = loss.mean()
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
-                if args.fp16:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                accelerator.backward(loss)
 
                 train_loss += loss.item()
-                num_train_examples += src_ids.size(0)
+                num_train_examples += input_ids.size(0)
+                train_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                    if args.fp16:
-                        scaler.unscale_(optimizer)
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        optimizer.step()
+                    optimizer.step()
                     optimizer.zero_grad()
                     scheduler.step()
                     global_step += 1
                     progress_bar.update(1)
 
-                if args.do_eval and global_step % args.save_steps == 0 and (step + 1) % args.gradient_accumulation_steps == 0:
+                '''
+                model_to_save = model.module if hasattr(model, "module") else model
+                output_model_file = os.path.join(args.output_dir, "checkpoint_ep-{}".format(epoch + 1))
+                if (epoch + 1) % 5 == 0:
+                    model_to_save.save_pretrained(output_model_file)
+                '''
+
+                if args.do_eval  and global_step % args.save_steps == 0:
                     logger.info("***** Running evaluation *****")
                     logger.info("  Num examples = %d", len(eval_examples))
                     logger.info("  Batch size = %d", args.eval_batch_size)
-
                     def decode(x):
                         return tokenizer.convert_ids_to_tokens(x, skip_special_tokens=True)
-
                     model.eval()
-                    eval_loss = 0
-                    eval_steps = 0
-                    all_inputs, all_labels, all_predictions = [], [], []
-                    for batch in tqdm(eval_dataloader,desc="Evaluation"):
+                    all_inputs, all_predictions, all_labels = [], [], []
+                    '''
+                    input_ids: cls + src + trg + sep + 0...
+                    labels:   ...-100... + trg + sep + -100...
+                    '''
+                    for i,batch in enumerate(tqdm(eval_dataloader, desc="Evaluation")):
                         batch = tuple(t.to(device) for t in batch)
-                        src_ids, attention_mask,token_type_ids, trg_ids = batch
+                        input_ids, attention_mask, labels = batch
+                        #if i<3:
+                        #    print("inputs: {}".format(input_ids.size()))
+                        #    print("labels: {}".format(labels.size()))
                         with torch.no_grad():
-                            outputs = model(input_ids=src_ids,
+                            outputs = model(input_ids=input_ids,
                                             attention_mask=attention_mask,
-                                            token_type_ids=token_type_ids,
-                                            labels=trg_ids)
-                            tmp_eval_loss = outputs.loss
-                            logits = outputs.logits
+                                            labels=labels)
+                            logits = outputs[1]
 
-                        src_ids = src_ids.tolist()
-                        trg_ids = trg_ids.cpu().numpy()
-                        eval_loss += tmp_eval_loss.mean().item()
-                        _, prd_ids = torch.max(logits, -1)
-                        prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist()
-                        for s, t, p in zip(src_ids, trg_ids, prd_ids):
-
+                            shift_inputs = input_ids[..., 1:].contiguous()
+                            shift_logits = logits[..., :-1, :].contiguous()
+                            shift_attention_mask = attention_mask[...,1:].contiguous()
+                            shift_labels = labels[..., 1:].contiguous()
+                        #(batch,max_seq)
+                        prd_ids = shift_logits.argmax(dim=-1)
+                        src_ids = shift_inputs.tolist()
+                        trg_ids = shift_labels.cpu().numpy().tolist()
+                        prd_ids = prd_ids.masked_fill(shift_attention_mask == 0, 0).tolist()
+                        if i<3:
+                            print("inputs: {}".format(np.array(src_ids).shape))
+                            print("predictions: {}".format(np.array(prd_ids).shape))
+                            print("labels: {}".format(np.array(trg_ids).shape))
+                        for i, (s, t, p) in enumerate(zip(src_ids, trg_ids, prd_ids)):
                             mapped_src = []
                             mapped_trg = []
                             mapped_prd = []
                             flag = False
                             for st, tt, pt in zip(s, t, p):
-                                if st == tokenizer.sep_token_id:
-                                    flag = True
+                                if tt!=-100:
+                                    flag=True
                                 if not flag:
                                     mapped_src += [st]
                                 else:
-                                    mapped_trg += [tt]
-                                    if st == tokenizer.mask_token_id:
-                                        mapped_prd += [pt]
-                                    else:
-                                        mapped_prd += [st]
+                                    mapped_trg += [tt if tt!=-100 else 0]
+                                    mapped_prd += [pt]
                             all_inputs += [decode(mapped_src)]
                             all_labels += [decode(mapped_trg)]
                             all_predictions += [decode(mapped_prd)]
 
-                        eval_steps += 1
-    
-                    loss = train_loss / global_step
-                    eval_loss = eval_loss / eval_steps
+                    print(all_inputs[0])
+                    print(all_labels[0])
+                    print(all_predictions[0])
+
+                    output_predict_file = os.path.join(args.output_dir, "predict_results.txt")
+                    print("all inputs size: {}".format(len(all_inputs)))
+                    print("all predictions size: {}".format(len(all_predictions)))
+                    print("all labels size: {}".format(len(all_labels)))
+
+                    train_epoch_loss = train_loss / len(train_dataloader)
+                    train_ppl = math.exp(train_epoch_loss)
                     p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
-    
+
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
                     with open(output_tp_file, "w") as writer:
                         for line in tp:
@@ -533,8 +502,7 @@ def main():
 
                     result = {
                         "global_step": global_step,
-                        "loss": loss,
-                        "eval_loss": eval_loss,
+                        "train_ppl": train_ppl,
                         "eval_p": p * 100,
                         "eval_r": r * 100,
                         "eval_f1": f1 * 100,
@@ -548,6 +516,7 @@ def main():
                     if len(best_result) > 3:
                         _, model_to_remove = best_result.pop()
                         os.remove(model_to_remove)
+
 
                     output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
                     with open(output_eval_file, "a") as writer:
@@ -563,66 +532,49 @@ def main():
                             logger.info("Global step: %s,  %s = %s", str(global_step), key, str(result[key]))
 
                 if global_step >= args.max_train_steps:
-                    wrap = True
                     break
-
     if args.do_test:
-        eval_examples = processor.get_test_examples(os.path.join(args.data_dir, task_name), args.test_on)
-        eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer)
+        eval_examples = processor.get_dev_examples(os.path.join(args.data_dir, task_name), args.eval_on)
 
-        all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
-        all_input_segment = torch.tensor([f.token_type_ids for f in eval_features], dtype=torch.long)
-        all_label_ids = torch.tensor([f.trg_ids for f in eval_features], dtype=torch.long)
-
-        eval_data = TensorDataset(all_input_ids, all_input_mask,all_input_segment, all_label_ids)
-        eval_sampler = SequentialSampler(eval_data)
-        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-        model = BertForMaskedLM.from_pretrained(args.load_model_path,
-                                                return_dict=True,
-                                                cache_dir=cache_dir)
-        model.to(device)
-        if args.load_state_dict:
-            model.load_state_dict(torch.load(args.load_state_dict))
-        if n_gpu > 1:
-            model = torch.nn.DataParallel(model)
-
-        logger.info("***** Running evaluation *****")
+        logger.info("***** Generation *****")
         logger.info("  Num examples = %d", len(eval_examples))
-        logger.info("  Batch size = %d", args.eval_batch_size)
+        logger.info("  Batch size = %d", 1)
 
-        def decode(input_ids):
-            return tokenizer.convert_ids_to_tokens(input_ids, skip_special_tokens=True)
-
-        model.eval()
-        eval_loss = 0
-        eval_steps = 0
+        predict_model = GPT2LMHeadModel.from_pretrained(args.load_model_path,
+                                                             cache_dir=cache_dir)
+        
+        #predict_model = PeftModel.from_pretrained(predict_model, args.load_ckpt)
+        #predict_model.print_trainable_parameters()
+        predict_model.to(device)
+        if args.load_state_dict:
+            predict_model.load_state_dict(torch.load(args.load_state_dict))
+        predict_model.eval()
         all_inputs, all_labels, all_predictions = [], [], []
-        for batch in eval_dataloader:
-            batch = tuple(t.to(device) for t in batch)
-            src_ids, attention_mask, token_type_ids, trg_ids = batch
-            with torch.no_grad():
-                outputs = model(input_ids=src_ids,
-                                attention_mask=attention_mask,
-                                token_type_ids=token_type_ids,
-                                labels=trg_ids)
-                tmp_eval_loss = outputs.loss
-                logits = outputs.logits
+        output_predict_file = os.path.join(args.output_dir, "test_results.txt")
+        with open(output_predict_file, "w") as writer:
+            for i,ex in enumerate(tqdm(eval_examples, desc="Testing")):
+                input_ids = tokenizer(ex.source, return_tensors="pt",is_split_into_words=True).input_ids.to(device)
+                if i<5:
+                    logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
+                trg = ex.target
+                src = ex.source
+                with torch.no_grad():
+                    ot = predict_model.generate(input_ids=input_ids,
+                                                max_new_tokens=64,
+                                                eos_token_id=tokenizer.eos_token_id)
+                                                
+                    pred = tokenizer.convert_ids_to_tokens(ot[0, input_ids.shape[1]:], skip_special_tokens=True)
+                    all_inputs+=[src]
+                    all_labels+=[trg]
+                    all_predictions+=[pred]
 
-            src_ids = src_ids.tolist()
-            trg_ids = trg_ids.cpu().numpy()
-            eval_loss += tmp_eval_loss.mean().item()
-            _, prd_ids = torch.max(logits, -1)
-            prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist()
-            for s, t, p in zip(src_ids, trg_ids, prd_ids):
-                all_inputs += [decode(s)]
-                all_labels += [decode(t)]
-                all_predictions += [decode(p)]
-            eval_steps += 1
+                    writer.write(" -> ".join([" ".join(src), " ".join(pred)]) + "\n")
+                    
 
-        eval_loss = eval_loss / eval_steps
-        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
+        del predict_model
+
+
+        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions) ## no need to decode
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
@@ -642,7 +594,6 @@ def main():
                 writer.write(line + "\n")
 
         result = {
-            "eval_loss": eval_loss,
             "eval_p": p * 100,
             "eval_r": r * 100,
             "eval_f1": f1 * 100,
@@ -661,6 +612,7 @@ def main():
                 result["eval_fpr"]))
         for key in sorted(result.keys()):
             logger.info("Global step: %s,  %s = %s", str(-1), key, str(result[key]))
+
 
 
 if __name__ == "__main__":
