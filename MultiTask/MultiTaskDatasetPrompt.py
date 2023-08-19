@@ -183,7 +183,7 @@ def seq_convert_examples_to_features(examples, label_list, prompt_length, mask_l
                 prompt_mask += [0] * len(encoded["input_ids"]) ## 0 signifies this position not prompt
                 active_bits += [-100] * len(encoded["input_ids"]) ## -100 signifies this position is not label position
             elif phi == "<pt>":
-                input_ids += [tokenizer.unk_token_id] * prompt_length
+                input_ids += [tokenizer.sep_token_id] * prompt_length
                 attention_mask += [1] * prompt_length
                 token_type_ids += [0] * prompt_length
                 prompt_mask += [1] * prompt_length  ## 0 signifies this position not prompt

@@ -37,7 +37,7 @@ task_qmc = Task(3,'afqmc','question-similarity')
 
 class PTuningWrapper(nn.Module):
 
-    def __init__(self, model, tokenizer, verbalizer_tnews, verbalizer_afqmc, prompt_length_sent, prompt_length_csc):
+    def __init__(self, model, tokenizer, verbalizer_tnews, verbalizer_afqmc, prompt_length_sent, prompt_length_csc, linear_prob):
         super().__init__()
         self.config = model.config
         self.tokenizer = tokenizer
@@ -90,6 +90,8 @@ class PTuningWrapper(nn.Module):
         self.prompt_linear_csc = nn.Sequential(nn.Linear(2 * self.config.hidden_size, self.config.hidden_size),
                                                nn.ReLU(),
                                                nn.Linear(self.config.hidden_size, self.config.hidden_size))
+        if linear_prob:
+            self.classifier = nn.Linear(self.config.hidden_size, self.config.vocab_size)
 
     def forward(
         self,
@@ -101,58 +103,61 @@ class PTuningWrapper(nn.Module):
         task_id=None, ## batch
         labels=None,
         inputs_embeds=None,
-        output_hidden_states=None,
-        return_dict=True
+        output_hidden_states=True,
+        return_dict=True,
+        apply_prompt=True,
+        linear_prob=False
     ):
-        # get embdding of all the tasks
-        inputs_embeds = self.word_embeddings(input_ids) if inputs_embeds is None else inputs_embeds
-
-        # afqmc
-        replace_embeds_afqmc = self.prompt_embeddings_afqmc(torch.LongTensor(list(range(self.prompt_length_sent))).to(inputs_embeds.device))
-        replace_embeds_afqmc = replace_embeds_afqmc.unsqueeze(0)
-        replace_embeds_afqmc = self.prompt_lstm_afqmc(replace_embeds_afqmc)[0]  # (prompt_length,2*hidden_size)
-        replace_embeds_afqmc = self.prompt_linear_afqmc(replace_embeds_afqmc).squeeze()  # (prompt_length,hidden)
-        # tnews
-        replace_embeds_tnews = self.prompt_embeddings_tnews(torch.LongTensor(list(range(self.prompt_length_sent))).to(inputs_embeds.device))
-        replace_embeds_tnews = replace_embeds_tnews.unsqueeze(0)
-        replace_embeds_tnews = self.prompt_lstm_tnews(replace_embeds_tnews)[0]  # (prompt_length,2*hidden_size)
-        replace_embeds_tnews = self.prompt_linear_tnews(replace_embeds_tnews).squeeze()  # (prompt_length,hidden)
-        # csc
-        replace_embeds_csc = self.prompt_embeddings_csc(torch.LongTensor(list(range(2*self.prompt_length_csc))).to(input_ids.device))
-        replace_embeds_csc = replace_embeds_csc.unsqueeze(0)  # (1,2*prompt_length,hidden_size)
-        replace_embeds_csc = self.prompt_lstm_csc(replace_embeds_csc)[0]  # (2*prompt_length,2*hidden_size)
-        replace_embeds_csc = self.prompt_linear_csc(replace_embeds_csc).squeeze()  # (2*prompt_length,hidden_size)
-
         csc_task_filter = (task_id == 1)
         tnews_task_filter = (task_id == 2)
         afqmc_task_filter = (task_id == 3)
-        ## prompt_mask (batch,seq)
-        # (batch size for csc,seq)
-        prompt_mask_csc = prompt_mask[csc_task_filter]
-        blocked_indices_csc = (prompt_mask_csc == 1).nonzero().reshape((prompt_mask_csc.shape[0], 2*self.prompt_length_csc, 2))[:, :, 1]  # (batch size for csc,2*prompt_length_csc)
-        # (batch size for tnews,seq)
-        prompt_mask_tnews = prompt_mask[tnews_task_filter]
-        blocked_indices_tnews = (prompt_mask_tnews == 1).nonzero().reshape((prompt_mask_tnews.shape[0], self.prompt_length_sent, 2))[:, :, 1]  # (batch size for tnews,prompt_length_sent)
-        # (batch size for afqmc,seq)
-        prompt_mask_afqmc = prompt_mask[afqmc_task_filter]
-        blocked_indices_afqmc = (prompt_mask_afqmc == 1).nonzero().reshape((prompt_mask_afqmc.shape[0], self.prompt_length_sent, 2))[:, :, 1]  # (batch size for afqmc,prompt_length_sent)
+        # get embdding of all the tasks
+        inputs_embeds = self.word_embeddings(input_ids) if inputs_embeds is None else inputs_embeds
+        if apply_prompt:
 
-        # replace the prompt positions in input_embeds with prompt embeddings correspondingly
-        csc_i, tnews_i, afqmc_i = 0, 0, 0
-        for i in range(inputs_embeds.shape[0]):
-            if task_id[i] == 1:
-                for j in range(blocked_indices_csc.shape[1]):
-                    inputs_embeds[i, blocked_indices_csc[csc_i, j],:] = replace_embeds_csc[j, :]
-                csc_i += 1
-            elif task_id[i] == 2:
-                for j in range(blocked_indices_tnews.shape[1]):
-                    inputs_embeds[i, blocked_indices_tnews[tnews_i,j], :] = replace_embeds_tnews[j, :]
-                tnews_i += 1
-            else:
-                assert task_id[i] == 3
-                for j in range(blocked_indices_afqmc.shape[1]):
-                    inputs_embeds[i, blocked_indices_afqmc[afqmc_i,j], :] = replace_embeds_afqmc[j, :]
-                afqmc_i += 1
+            # afqmc
+            replace_embeds_afqmc = self.prompt_embeddings_afqmc(torch.LongTensor(list(range(self.prompt_length_sent))).to(inputs_embeds.device))
+            replace_embeds_afqmc = replace_embeds_afqmc.unsqueeze(0)
+            replace_embeds_afqmc = self.prompt_lstm_afqmc(replace_embeds_afqmc)[0]  # (prompt_length,2*hidden_size)
+            replace_embeds_afqmc = self.prompt_linear_afqmc(replace_embeds_afqmc).squeeze()  # (prompt_length,hidden)
+            # tnews
+            replace_embeds_tnews = self.prompt_embeddings_tnews(torch.LongTensor(list(range(self.prompt_length_sent))).to(inputs_embeds.device))
+            replace_embeds_tnews = replace_embeds_tnews.unsqueeze(0)
+            replace_embeds_tnews = self.prompt_lstm_tnews(replace_embeds_tnews)[0]  # (prompt_length,2*hidden_size)
+            replace_embeds_tnews = self.prompt_linear_tnews(replace_embeds_tnews).squeeze()  # (prompt_length,hidden)
+            # csc
+            replace_embeds_csc = self.prompt_embeddings_csc(torch.LongTensor(list(range(2*self.prompt_length_csc))).to(input_ids.device))
+            replace_embeds_csc = replace_embeds_csc.unsqueeze(0)  # (1,2*prompt_length,hidden_size)
+            replace_embeds_csc = self.prompt_lstm_csc(replace_embeds_csc)[0]  # (2*prompt_length,2*hidden_size)
+            replace_embeds_csc = self.prompt_linear_csc(replace_embeds_csc).squeeze()  # (2*prompt_length,hidden_size)
+
+            # prompt_mask (batch,seq)
+            # (batch size for csc,seq)
+            prompt_mask_csc = prompt_mask[csc_task_filter]
+            blocked_indices_csc = (prompt_mask_csc == 1).nonzero().reshape((prompt_mask_csc.shape[0], 2*self.prompt_length_csc, 2))[:, :, 1]  # (batch size for csc,2*prompt_length_csc)
+            # (batch size for tnews,seq)
+            prompt_mask_tnews = prompt_mask[tnews_task_filter]
+            blocked_indices_tnews = (prompt_mask_tnews == 1).nonzero().reshape((prompt_mask_tnews.shape[0], self.prompt_length_sent, 2))[:, :, 1]  # (batch size for tnews,prompt_length_sent)
+            # (batch size for afqmc,seq)
+            prompt_mask_afqmc = prompt_mask[afqmc_task_filter]
+            blocked_indices_afqmc = (prompt_mask_afqmc == 1).nonzero().reshape((prompt_mask_afqmc.shape[0], self.prompt_length_sent, 2))[:, :, 1]  # (batch size for afqmc,prompt_length_sent)
+
+            # replace the prompt positions in input_embeds with prompt embeddings correspondingly
+            csc_i, tnews_i, afqmc_i = 0, 0, 0
+            for i in range(inputs_embeds.shape[0]):
+                if task_id[i] == 1:
+                    for j in range(blocked_indices_csc.shape[1]):
+                        inputs_embeds[i, blocked_indices_csc[csc_i, j],:] = replace_embeds_csc[j, :]
+                    csc_i += 1
+                elif task_id[i] == 2:
+                    for j in range(blocked_indices_tnews.shape[1]):
+                        inputs_embeds[i, blocked_indices_tnews[tnews_i,j], :] = replace_embeds_tnews[j, :]
+                    tnews_i += 1
+                else:
+                    assert task_id[i] == 3
+                    for j in range(blocked_indices_afqmc.shape[1]):
+                        inputs_embeds[i, blocked_indices_afqmc[afqmc_i,j], :] = replace_embeds_afqmc[j, :]
+                    afqmc_i += 1
 
         outputs = self.model(
             inputs_embeds=inputs_embeds,
@@ -178,6 +183,9 @@ class PTuningWrapper(nn.Module):
         # tnews
         if tnews_task_filter.any():
             mask_length = 2
+            if linear_prob:
+                hidden_states = outputs.hidden_states
+                logits = self.classifier(hidden_states[-1])
             tnews_logits = logits[tnews_task_filter]  # tnews_batch,seq,vocab
             # tnews_batch,seq
             tnews_active_bits = active_bits[tnews_task_filter]
@@ -383,8 +391,10 @@ def main():
     parser.add_argument("--anchor",type=str,default=None,help="the anchor tokens we add to the prompt.")
     parser.add_argument("--freeze_lm", action="store_true",
                         help="Whether to keep LM parameters frozen.")
+    parser.add_argument("--not_apply_prompt", action="store_true")
 
     parser.add_argument("--print_para_names", action="store_true", help="only print the parameters' names and do not train" )
+    parser.add_argument("--linear_prob",action="store_true")
 
     args = parser.parse_args()
 
@@ -512,10 +522,10 @@ def main():
         if "afqmc" in verbalizers.keys():
             verbalizer_afqmc = verbalizers["afqmc"]
         model = PTuningWrapper(model, tokenizer, verbalizer_tnews, verbalizer_afqmc,
-                               args.sent_prompt_length, args.csc_prompt_length)  # apply p-tuning(prompt) to the model
+                               args.sent_prompt_length, args.csc_prompt_length, args.linear_prob)  # apply p-tuning(prompt) to the model
         model.to(device)
         if args.load_state_dict:
-            model.load_state_dict(torch.load(args.load_state_dict))
+            model.load_state_dict(torch.load(args.load_state_dict),strict=False)
         if n_gpu > 1:
             # It is recommended to use DistributedDataParallel
             model = torch.nn.DataParallel(model)
@@ -541,7 +551,7 @@ def main():
                                   num_training_steps=args.max_train_steps)
         #######################################################################
         if args.print_para_names:
-            prompt_params = ["prompt_"]
+            prompt_params = ["prompt_","classifier.weight", "classifer.bias"]
             for n, p in model.named_parameters():
                 if not any(nd in n for nd in prompt_params):  # why not nd==n
                     p.requires_grad = False
@@ -549,7 +559,7 @@ def main():
             return
 
         if args.freeze_lm:  # freeze the parameters in the lm except prompt parameters
-            prompt_params = ["prompt_"]
+            prompt_params = ["prompt_","classifier.weight", "classifer.bias"]
             for n, p in model.named_parameters():
                 if not any(nd in n for nd in prompt_params):  # why not nd==n
                     p.requires_grad = False
@@ -633,7 +643,9 @@ def main():
                                         prompt_mask=prompt_mask,
                                         active_bits=active_bits,
                                         task_id=task_ids,
-                                        labels=label_ids,)
+                                        labels=label_ids,
+                                        apply_prompt=not args.not_apply_prompt,
+                                        linear_prob=args.linear_prob)
                 else:
                     outputs = model(input_ids=input_ids,
                                     attention_mask=input_mask,
@@ -641,7 +653,9 @@ def main():
                                     prompt_mask=prompt_mask,
                                     active_bits=active_bits,
                                     task_id=task_ids,
-                                    labels=label_ids,)
+                                    labels=label_ids,
+                                    apply_prompt=not args.not_apply_prompt,
+                                    linear_prob = args.linear_prob)
                 loss = outputs[0]
 
                 loss = outputs[0]
@@ -691,7 +705,9 @@ def main():
                                             prompt_mask=prompt_mask,
                                             active_bits=active_bits,
                                             task_id=task_ids,
-                                            labels=label_ids,)
+                                            labels=label_ids,
+                                            apply_prompt=not args.not_apply_prompt,
+                                            linear_prob = args.linear_prob)
                             tmp_eval_loss = outputs[0]
                             logits = outputs[1] ##(batch_size,seq_length,vocab_size) or (batch_size,label_list_size)
 
@@ -865,7 +881,7 @@ def main():
         if "afqmc" in verbalizers.keys():
             verbalizer_afqmc = verbalizers["afqmc"]
         model = PTuningWrapper(model, tokenizer, verbalizer_tnews, verbalizer_afqmc,
-                               args.sent_prompt_length, args.csc_prompt_length)  # apply p-tuning(prompt) to the model
+                               args.sent_prompt_length, args.csc_prompt_length, args.linear_prob)  # apply p-tuning(prompt) to the model
         model.to(device)
         ## load the checkpoints to do test
         if args.load_state_dict:
@@ -895,7 +911,9 @@ def main():
                                 prompt_mask=prompt_mask,
                                 active_bits=active_bits,
                                 task_id=task_ids,
-                                labels=label_ids,)
+                                labels=label_ids,
+                                apply_prompt=not args.not_apply_prompt,
+                                linear_prob=args.linear_prob)
                 tmp_eval_loss = outputs[0]
                 logits = outputs[1] ##(batch_size,seq_length,vocab_size) or (batch_size,label_list_size)
 

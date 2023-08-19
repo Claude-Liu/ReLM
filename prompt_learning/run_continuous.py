@@ -501,11 +501,13 @@ def main():
         ]
         ## set the Adam optimizer
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-    
+        '''
         scheduler = get_scheduler(name=args.lr_scheduler_type,
                                   optimizer=optimizer,
                                   num_warmup_steps=args.max_train_steps * args.warmup_proportion,
                                   num_training_steps=args.max_train_steps)
+        
+        '''
         
         
         #######################################################################
@@ -591,7 +593,7 @@ def main():
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
-                    scheduler.step()## schedule the lr dynamically
+                    #scheduler.step()## schedule the lr dynamically
                     global_step += 1
                     progress_bar.update(1)
 
