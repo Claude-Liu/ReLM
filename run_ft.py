@@ -500,7 +500,7 @@ def main():
                                                 max_new_tokens=20,
                                                 eos_token_id=tokenizer.eos_token_id)
                                                 
-                    ot = tokenizer.deocde(ot[0, input_ids.shape[1]:], skip_special_tokens=True)
+                    ot = tokenizer.decode(ot[0, input_ids.shape[1]:], skip_special_tokens=True)
                     gt = ex.ends[-1]
 
                     writer.write(" -> ".join([gt, ot]) + "\n")

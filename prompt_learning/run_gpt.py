@@ -137,7 +137,7 @@ class Metrics:
                 if src_char!= trg_char:
                     ret[i] = "(" + src_char + "->" + trg_char + ")"
 
-            return "".join(ret)
+            return "".join(ret)+'\n'+"".join(src)+'\n'+"".join(trg)+'\n'
         def decode(x):
                         return tokenizer.convert_ids_to_tokens(x, skip_special_tokens=True)
         pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents = [], [], [], [], [], [], [], []
@@ -545,6 +545,10 @@ def main():
         
         #predict_model = PeftModel.from_pretrained(predict_model, args.load_ckpt)
         #predict_model.print_trainable_parameters()
+        logger.info("pad_token_id = %d", tokenizer.pad_token_id)
+        logger.info("eos_token_id = %d", tokenizer.eos_token_id)
+        logger.info("sep_token_id = %d", tokenizer.sep_token_id)
+
         predict_model.to(device)
         if args.load_state_dict:
             predict_model.load_state_dict(torch.load(args.load_state_dict))
@@ -554,13 +558,16 @@ def main():
         with open(output_predict_file, "w") as writer:
             for i,ex in enumerate(tqdm(eval_examples, desc="Testing")):
                 input_ids = tokenizer(ex.source, return_tensors="pt",is_split_into_words=True).input_ids.to(device)
+                attention_mask = tokenizer(ex.source, return_tensors="pt",is_split_into_words=True).attention_mask.to(device)
+                print("input_ids size {}".format(input_ids.size()))
                 if i<5:
                     logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
                 trg = ex.target
                 src = ex.source
                 with torch.no_grad():
                     ot = predict_model.generate(input_ids=input_ids,
-                                                max_new_tokens=64,
+                                                attention_mask=attention_mask,
+                                                max_new_tokens=input_ids.size()[1],
                                                 eos_token_id=tokenizer.eos_token_id)
                                                 
                     pred = tokenizer.convert_ids_to_tokens(ot[0, input_ids.shape[1]:], skip_special_tokens=True)

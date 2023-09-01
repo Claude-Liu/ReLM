@@ -7,12 +7,10 @@ import math
 import copy
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
-from transformers import SchedulerType, get_scheduler
-from transformers import BertForMaskedLM
+from autocsc import *
 
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -29,25 +27,28 @@ class InputExample(object):
 
 
 class InputFeatures(object):
-    def __init__(self, src_ids, attention_mask,token_type_ids, trg_ids, trg_ref_ids):
+    def __init__(self, src_ids, attention_mask, trg_ids):
         self.src_ids = src_ids
         self.attention_mask = attention_mask
-        self.token_type_ids = token_type_ids
         self.trg_ids = trg_ids
-        self.trg_ref_ids = trg_ref_ids
 
 
-class SighanProcessor:
-    """Processor for the Sighan data set."""
+class DataProcessor:
+    """
+    Processor for the data set.
+    a) in a .tsv format, i.e. src\ttrg;
+    b) separate Chinese characters from each other by spaces;
+    c) without headlines.
+    """
 
-    def get_train_examples(self, data_dir, division="all"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "train_{}.txt".format(division))), "train")
+    def get_train_examples(self, data_dir, filename):
+        return self._create_examples(self._read_csv(os.path.join(data_dir, filename)), "train")
 
-    def get_dev_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "dev")
+    def get_dev_examples(self, data_dir, filename):
+        return self._create_examples(self._read_csv(os.path.join(data_dir, filename)), "dev")
 
-    def get_test_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
+    def get_test_examples(self, data_dir, filename):
+        return self._create_examples(self._read_csv(os.path.join(data_dir, filename)), "test")
 
     @staticmethod
     def _read_csv(input_file):
@@ -68,63 +69,25 @@ class SighanProcessor:
         return examples
 
 
-class EcspellProcessor:
-    """Processor for the ECSpell data set."""
-
-    def get_train_examples(self, data_dir, division="law"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "train_{}.txt".format(division))), "train")
-
-    def get_dev_examples(self, data_dir, division="law"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "dev")
-
-    def get_test_examples(self, data_dir, division="law"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
-
-    @staticmethod
-    def _read_csv(input_file):
-        with open(input_file, "r", encoding="utf-8") as f:
-            lines = []
-            for line in f:
-                src, trg = line.strip().split("\t")
-                lines.append((src.split(), trg.split()))
-            return lines
-
-    @staticmethod
-    def _create_examples(lines, set_type):
-        examples = []
-        for i, (src, trg) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            if len(src) == len(trg):
-                if len(src) == len(trg):
-                    examples.append(InputExample(guid=guid, src=src, trg=trg))
-        return examples
-
-
-def convert_examples_to_features(examples, max_seq_length, tokenizer, static_mask=False):
+def convert_examples_to_features(examples, max_seq_length, tokenizer):
     features = []
     for i, example in enumerate(examples):
-        src, trg, trg_ref = convert_examples_to_prompts(example.src, example.trg, max_seq_length // 2, tokenizer, static_mask)
-        example.src = src
-        example.trg = trg
         encoded_inputs = tokenizer(example.src,
                                    max_length=max_seq_length,
                                    padding="max_length",
                                    truncation=True,
+                                   return_token_type_ids=True,
                                    is_split_into_words=True)
-        src_ids = encoded_inputs["input_ids"]
-        attention_mask = encoded_inputs["attention_mask"]
-        token_type_ids = encoded_inputs["token_type_ids"]
+
         trg_ids = tokenizer(example.trg,
-                            max_length=max_seq_length,
-                            padding="max_length",
-                            truncation=True,
-                            is_split_into_words=True)["input_ids"]
-        trg_ref_ids = tokenizer(trg_ref,
                             max_length=max_seq_length,
                             padding="max_length",
                             truncation=True,
                             return_token_type_ids=True,
                             is_split_into_words=True)["input_ids"]
+
+        src_ids = encoded_inputs["input_ids"]
+        attention_mask = encoded_inputs["attention_mask"]
 
         assert len(src_ids) == max_seq_length
         assert len(attention_mask) == max_seq_length
@@ -142,57 +105,50 @@ def convert_examples_to_features(examples, max_seq_length, tokenizer, static_mas
         features.append(
                 InputFeatures(src_ids=src_ids,
                               attention_mask=attention_mask,
-                              token_type_ids=token_type_ids,
-                              trg_ids=trg_ids,
-                              trg_ref_ids=trg_ref_ids)
+                              trg_ids=trg_ids)
         )
     return features
 
 
-def convert_examples_to_prompts(src, trg, max_seq_length, tokenizer, static_mask=False):
-    def truncate(x, max_length):
-        return x[: max_length]
-
-    src = truncate(src, max_seq_length-1)
-    trg = truncate(trg, max_seq_length-1)
-    if static_mask:
-        prompt_src = [tokenizer.mask_token if random.random() < 0.2 else _ for _ in src] + [tokenizer.sep_token] + [tokenizer.mask_token for _ in trg]
-    else:
-        ##src+[SEP]+[MASK]...
-        prompt_src = src + [tokenizer.sep_token] + [tokenizer.mask_token for _ in trg]
-    ## src+[SEP]+trg
-    prompt_trg = src + [tokenizer.sep_token] + trg
-    trg_ref = trg + [tokenizer.sep_token] + trg
-
-    return prompt_src, prompt_trg, trg_ref
-
-def dynamic_mask_token(inputs, targets, tokenizer, device, mask_mode="noerror", noise_probability=0.2):
-    #src:[CLS]...[CLS],x1,x2,...,xn,[SEP],...,[SEP],m1,m2,...,mn
-    #trg:[CLS]...[CLS],t1,t2,...,tn,[SEP],...,[SEP],t1,t2,...,tn
-    ## mask_mode in ["all","error","noerror"]
-    inputs = inputs.clone()
-    probability_matrix = torch.full(inputs.shape, noise_probability).to(device)
-    #do not mask sepcail tokens
-    special_tokens_mask = [
-        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
-    ]
-    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool).to(device)
-
-    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-    if mask_mode == "noerror":
-        probability_matrix.masked_fill_(inputs!=targets, value=0.0)
-    elif mask_mode == "error":
-        probability_matrix.masked_fill_(inputs==targets, value=0.0)
-    else:
-        assert mask_mode == "all"
-    masked_indices = torch.bernoulli(probability_matrix).bool()
-    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-
-    return inputs
-
 class Metrics:
     @staticmethod
     def compute(src_sents, trg_sents, prd_sents):
+        def difference(src, trg):
+            ret = copy.deepcopy(src)
+            for i, (src_char, trg_char) in enumerate(zip(src, trg)):
+                if src_char!= trg_char:
+                    ret[i] = "(" + src_char + "->" + trg_char + ")"
+
+            return "".join(ret)
+
+        pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents = [], [], [], [], [], [], []
+        for s, t, p in zip(src_sents, trg_sents, prd_sents):
+            if s != t:
+                pos_sents.append(difference(s, t))
+                if p == t:
+                    tp_sents.append(difference(s, t))
+                if p == s:
+                    fn_sents.append(difference(s, t))
+
+            else:
+                neg_sents.append(difference(s, t))
+                if p != t:
+                    fp_sents.append(difference(t, p))
+
+            if s != p:
+                prd_pos_sents.append(difference(s, p))
+            if s == p:
+                prd_neg_sents.append(difference(s, p))
+
+        p = 1.0 * len(tp_sents) / len(prd_pos_sents)
+        r = 1.0 * len(tp_sents) / len(pos_sents)
+        f1 = 2.0 * (p * r) / (p + r + 1e-12)
+        fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
+
+        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents
+    
+    @staticmethod
+    def compute_test(src_sents, trg_sents, prd_sents):
         def difference(src, trg):
             ret = copy.deepcopy(src)
             for i, (src_char, trg_char) in enumerate(zip(src, trg)):
@@ -211,7 +167,7 @@ class Metrics:
                 if p == s:
                     fn_sents.append(difference(s, t))
                 if (p!=t and p!=s):
-                    wp_sents.append(difference(s,t))
+                    wp_sents.append(difference(s,p))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
@@ -222,54 +178,92 @@ class Metrics:
                 prd_pos_sents.append(difference(s, p))
             if s == p:
                 prd_neg_sents.append(difference(s, p))
-
-        p = 1.0 * len(tp_sents) / len(prd_pos_sents)
-        r = 1.0 * len(tp_sents) / len(pos_sents)
-        f1 = 2.0 * (p * r) / (p + r + 1e-12)
+        if len(pos_sents)==0:
+            p=0
+            r=0
+            f1=0
+            wpr=0
+        else:
+            p = 1.0 * len(tp_sents) / len(prd_pos_sents)
+            r = 1.0 * len(tp_sents) / len(pos_sents)
+            f1 = 2.0 * (p * r) / (p + r + 1e-12)
+            wpr = 1.0 * len(wp_sents) / len(pos_sents)
         fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
 
-        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
+        return p, r, f1, fpr, wpr, tp_sents, fp_sents, fn_sents, wp_sents
+
+
+def mask_tokens(inputs, tokenizer, noise_probability=0.2):
+    inputs = inputs.clone()
+    probability_matrix = torch.full(inputs.shape, noise_probability)
+    special_tokens_mask = [
+        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
+    ]
+    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+
+    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+    masked_indices = torch.bernoulli(probability_matrix).bool()
+    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+
+    return inputs
+
+
+def mask_tokens_only_neg(inputs, labels, tokenizer, noise_probability=0.2):
+    inputs = inputs.clone()
+    labels = labels.clone()
+    probability_matrix = torch.full(inputs.shape, noise_probability)
+    special_tokens_mask = [
+        tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
+    ]
+    special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+    neq_tokens_mask = (inputs != labels).cpu()
+
+    probability_matrix.masked_fill_(special_tokens_mask + neq_tokens_mask, value=0.0)
+    masked_indices = torch.bernoulli(probability_matrix).bool()
+    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+
+    return inputs
 
 
 def main():
     parser = argparse.ArgumentParser()
 
-    # Data config.
-    parser.add_argument("--data_dir", type=str, default="data/",
+    # Data config
+    parser.add_argument("--data_dir", type=str, default="../data/csc/",
                         help="Directory to contain the input data for all tasks.")
-    parser.add_argument("--task_name", type=str, default="SIGHAN",
-                        help="Name of the training task.")
+    parser.add_argument("--train_on", type=str, default="",
+                        help="Specify a training set.")
+    parser.add_argument("--eval_on", type=str, default="",
+                        help="Specify a dev set.")
+    parser.add_argument("--test_on", type=str, default="",
+                        help="Specify a test set.")
     parser.add_argument("--load_model_path", type=str, default="bert-base-chinese",
-                        help="Pre-trained model path to load if needed.")
+                        help="Pre-trained model path to load.")
+    parser.add_argument("--model_type", type=str, default="finetune",
+                        help="Model architecture to load.")
     parser.add_argument("--cache_dir", type=str, default="../cache/",
                         help="Directory to store the pre-trained language models downloaded from s3.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
     parser.add_argument("--load_state_dict", type=str, default="",
-                        help="Trained model weights to load for evaluation.")
+                        help="Trained model weights to load for evaluation if needed.")
 
-    # Training config.
+    # Training config
     parser.add_argument("--do_train", action="store_true",
                         help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true",
                         help="Whether to evaluate on the dev set.")
     parser.add_argument("--do_test", action="store_true",
                         help="Whether to evaluate on the test set.")
-    parser.add_argument("--train_on", type=str, default="all",
-                        help="Choose a training set.")
-    parser.add_argument("--eval_on", type=str, default="15",
-                        help="Choose a dev set.")
-    parser.add_argument("--test_on", type=str, default="15",
-                        help="Choose a test set.")
     parser.add_argument("--use_slow_tokenizer", action="store_true",
                         help="A slow tokenizer will be used if passed.")
     parser.add_argument("--do_lower_case", action="store_true",
                         help="Set this flag if you are using an uncased model.")
-    parser.add_argument("--max_seq_length", type=int, default=128,
+    parser.add_argument("--max_seq_length", type=int, default=64,
                         help="Maximum total input sequence length after word-piece tokenization.")
     parser.add_argument("--train_batch_size", type=int, default=128,
                         help="Total batch size for training.")
-    parser.add_argument("--eval_batch_size", type=int, default=256,
+    parser.add_argument("--eval_batch_size", type=int, default=512,
                         help="Total batch size for evaluation.")
     parser.add_argument("--learning_rate", type=float, default=5e-5,
                         help="Initial learning rate for Adam.")
@@ -277,10 +271,6 @@ def main():
                         help="Total number of training epochs to perform.")
     parser.add_argument("--max_train_steps", type=int, default=None,
                         help="Total number of training steps to perform. If provided, overrides training epochs.")
-    parser.add_argument("--lr_scheduler_type", type=SchedulerType, default="linear",
-                        help="Scheduler type for learning rate warmup.")
-    parser.add_argument("--warmup_proportion", type=float, default=0.1,
-                        help="Proportion of training to perform learning rate warmup for.")
     parser.add_argument("--weight_decay", type=float, default=0.,
                         help="L2 weight decay for training.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
@@ -294,16 +284,15 @@ def main():
     parser.add_argument("--save_steps", type=int, default=100,
                         help="How many steps to save the checkpoint once.")
     parser.add_argument("--mft", action="store_true",
-                        help="Training with masked-fine-tuning (not published yet).")
-    parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
-    parser.add_argument("--mask_rate", type=float, default=0.2, help="the percentage we mask the source sentence in mask-ft technique")
+                        help="Training with masked-fine-tuning.")
 
     args = parser.parse_args()
 
-    processors = {
-        "sighan": SighanProcessor,
-        "ecspell": EcspellProcessor,
-    }
+    AutoCSC = {
+            "finetune": AutoCSCfinetune,
+            "softmasked": AutoCSCSoftMasked,
+            "mdcspell": AutoCSCMDCSpell,
+        }
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     n_gpu = torch.cuda.device_count()
@@ -324,29 +313,24 @@ def main():
     if args.do_train:
         torch.save(args, os.path.join(args.output_dir, "train_args.bin"))
 
-    task_name = args.task_name.lower()
-    if task_name not in processors:
-        raise ValueError("Task not found: %s" % task_name)
-
-    processor = processors[task_name]()
+    processor = DataProcessor()
 
     cache_dir = args.cache_dir
     tokenizer = AutoTokenizer.from_pretrained(args.load_model_path,
                                               do_lower_case=args.do_lower_case,
                                               cache_dir=cache_dir,
-                                              use_fast=not args.use_slow_tokenizer)
+                                              use_fast=not args.use_slow_tokenizer,
+                                              add_prefix_space=True)
 
     if args.do_train:
-        train_examples = processor.get_train_examples(os.path.join(args.data_dir, task_name), args.train_on)
+        train_examples = processor.get_train_examples(args.data_dir, args.train_on)
         train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer)
 
         all_input_ids = torch.tensor([f.src_ids for f in train_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
-        all_input_segment = torch.tensor([f.token_type_ids for f in train_features], dtype=torch.long)
         all_label_ids = torch.tensor([f.trg_ids for f in train_features], dtype=torch.long)
-        all_trg_ref_ids = torch.tensor([f.trg_ref_ids for f in train_features], dtype=torch.long)
 
-        train_data = TensorDataset(all_input_ids, all_input_mask,all_input_segment, all_label_ids, all_trg_ref_ids)
+        train_data = TensorDataset(all_input_ids, all_input_mask, all_label_ids)
         train_sampler = RandomSampler(train_data)
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
@@ -356,9 +340,8 @@ def main():
         else:
             args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-        model = BertForMaskedLM.from_pretrained(args.load_model_path,
-                                                return_dict=True,
-                                                cache_dir=cache_dir)
+        model = AutoCSC[args.model_type].from_pretrained(args.load_model_path,
+                                                         cache_dir=cache_dir)
         model.to(device)
         if args.load_state_dict:
             model.load_state_dict(torch.load(args.load_state_dict))
@@ -378,10 +361,6 @@ def main():
         ]
 
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-        scheduler = get_scheduler(name=args.lr_scheduler_type,
-                                  optimizer=optimizer,
-                                  num_warmup_steps=args.max_train_steps * args.warmup_proportion,
-                                  num_training_steps=args.max_train_steps)
 
         scaler = None
         if args.fp16:
@@ -390,15 +369,14 @@ def main():
             scaler = GradScaler()
         
         if args.do_eval:
-            eval_examples = processor.get_dev_examples(os.path.join(args.data_dir, task_name), args.eval_on)
+            eval_examples = processor.get_dev_examples(args.data_dir, args.eval_on)
             eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer)
 
             all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
             all_input_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
-            all_input_segment = torch.tensor([f.token_type_ids for f in eval_features], dtype=torch.long)
             all_label_ids = torch.tensor([f.trg_ids for f in eval_features], dtype=torch.long)
 
-            eval_data = TensorDataset(all_input_ids, all_input_mask, all_input_segment, all_label_ids)
+            eval_data = TensorDataset(all_input_ids, all_input_mask, all_label_ids)
             eval_sampler = SequentialSampler(eval_data)
             eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
@@ -412,29 +390,27 @@ def main():
         best_result = list()
         wrap = False
         progress_bar = tqdm(range(args.max_train_steps))
-        for _ in range(int(args.num_train_epochs)):
+        for _ in progress_bar:
             train_loss = 0
             num_train_examples = 0
             if wrap: break
             for step, batch in enumerate(train_dataloader):
                 model.train()
                 batch = tuple(t.to(device) for t in batch)
-                src_ids, attention_mask,token_type_ids, trg_ids, trg_ref_ids = batch
+                src_ids, attention_mask, trg_ids = batch
                 if args.mft:
-                    src_ids = dynamic_mask_token(src_ids, trg_ref_ids, tokenizer, device, mask_mode=args.mask_mode, noise_probability=args.mask_rate)
-                trg_ids[(src_ids == trg_ids)] = -100
+                    src_ids = mask_tokens_only_neg(src_ids, trg_ids, tokenizer)
 
                 if args.fp16:
                     with autocast():
-                        outputs = model(input_ids=src_ids,
+                        outputs = model(src_ids=src_ids,
                                         attention_mask=attention_mask,
-                                        token_type_ids=token_type_ids,
-                                        labels=trg_ids)
+                                        trg_ids=trg_ids)
                 else:
-                    outputs = model(input_ids=src_ids,
+                    outputs = model(src_ids=src_ids,
                                     attention_mask=attention_mask,
-                                    labels=trg_ids)
-                loss = outputs.loss
+                                    trg_ids=trg_ids)
+                loss = outputs["loss"]
 
                 if n_gpu > 1:
                     loss = loss.mean()
@@ -455,64 +431,35 @@ def main():
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
-                    scheduler.step()
                     global_step += 1
                     progress_bar.update(1)
 
-                if args.do_eval and global_step % args.save_steps == 0 and (step + 1) % args.gradient_accumulation_steps == 0:
+                if args.do_eval and global_step % args.save_steps == 0:
                     logger.info("***** Running evaluation *****")
                     logger.info("  Num examples = %d", len(eval_examples))
                     logger.info("  Batch size = %d", args.eval_batch_size)
 
-                    def decode(x):
-                        return tokenizer.convert_ids_to_tokens(x, skip_special_tokens=True)
+                    def decode(input_ids):
+                        return tokenizer.convert_ids_to_tokens(input_ids, skip_special_tokens=True)
 
                     model.eval()
-                    eval_loss = 0
-                    eval_steps = 0
                     all_inputs, all_labels, all_predictions = [], [], []
-                    for batch in tqdm(eval_dataloader,desc="Evaluation"):
+                    for batch in tqdm(eval_dataloader):
                         batch = tuple(t.to(device) for t in batch)
-                        src_ids, attention_mask,token_type_ids, trg_ids = batch
+                        src_ids, attention_mask, trg_ids = batch
                         with torch.no_grad():
-                            outputs = model(input_ids=src_ids,
+                            outputs = model(src_ids=src_ids,
                                             attention_mask=attention_mask,
-                                            token_type_ids=token_type_ids,
-                                            labels=trg_ids)
-                            tmp_eval_loss = outputs.loss
-                            logits = outputs.logits
+                                            trg_ids=trg_ids)
+                            prd_ids = outputs["predict_ids"].tolist()
 
-                        src_ids = src_ids.tolist()
-                        trg_ids = trg_ids.cpu().numpy()
-                        eval_loss += tmp_eval_loss.mean().item()
-                        _, prd_ids = torch.max(logits, -1)
-                        prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist()
                         for s, t, p in zip(src_ids, trg_ids, prd_ids):
-
-                            mapped_src = []
-                            mapped_trg = []
-                            mapped_prd = []
-                            flag = False
-                            for st, tt, pt in zip(s, t, p):
-                                if st == tokenizer.sep_token_id:
-                                    flag = True
-                                if not flag:
-                                    mapped_src += [st]
-                                else:
-                                    mapped_trg += [tt]
-                                    if st == tokenizer.mask_token_id:
-                                        mapped_prd += [pt]
-                                    else:
-                                        mapped_prd += [st]
-                            all_inputs += [decode(mapped_src)]
-                            all_labels += [decode(mapped_trg)]
-                            all_predictions += [decode(mapped_prd)]
-
-                        eval_steps += 1
+                            all_inputs += [decode(s)]
+                            all_labels += [decode(t)]
+                            all_predictions += [decode(p)]
     
                     loss = train_loss / global_step
-                    eval_loss = eval_loss / eval_steps
-                    p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
+                    p, r, f1, fpr, tp, fp, fn = Metrics.compute(all_inputs, all_labels, all_predictions)
     
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
                     with open(output_tp_file, "w") as writer:
@@ -526,15 +473,10 @@ def main():
                     with open(output_fn_file, "w") as writer:
                         for line in fn:
                             writer.write(line + "\n")
-                    output_wp_file = os.path.join(args.output_dir, "sents.wp")
-                    with open(output_wp_file, "w") as writer:
-                        for line in wp:
-                            writer.write(line + "\n")
 
                     result = {
                         "global_step": global_step,
                         "loss": loss,
-                        "eval_loss": eval_loss,
                         "eval_p": p * 100,
                         "eval_r": r * 100,
                         "eval_f1": f1 * 100,
@@ -567,21 +509,19 @@ def main():
                     break
 
     if args.do_test:
-        eval_examples = processor.get_test_examples(os.path.join(args.data_dir, task_name), args.test_on)
+        eval_examples = processor.get_test_examples(args.data_dir, args.test_on)
         eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer)
 
         all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
-        all_input_segment = torch.tensor([f.token_type_ids for f in eval_features], dtype=torch.long)
         all_label_ids = torch.tensor([f.trg_ids for f in eval_features], dtype=torch.long)
 
-        eval_data = TensorDataset(all_input_ids, all_input_mask,all_input_segment, all_label_ids)
+        eval_data = TensorDataset(all_input_ids, all_input_mask, all_label_ids)
         eval_sampler = SequentialSampler(eval_data)
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-        model = BertForMaskedLM.from_pretrained(args.load_model_path,
-                                                return_dict=True,
-                                                cache_dir=cache_dir)
+        model = AutoCSC[args.model_type].from_pretrained(args.load_model_path,
+                                                         cache_dir=cache_dir)
         model.to(device)
         if args.load_state_dict:
             model.load_state_dict(torch.load(args.load_state_dict))
@@ -599,22 +539,17 @@ def main():
         eval_loss = 0
         eval_steps = 0
         all_inputs, all_labels, all_predictions = [], [], []
-        for batch in eval_dataloader:
+        for batch in tqdm(eval_dataloader):
             batch = tuple(t.to(device) for t in batch)
-            src_ids, attention_mask, token_type_ids, trg_ids = batch
+            src_ids, attention_mask, trg_ids = batch
             with torch.no_grad():
-                outputs = model(input_ids=src_ids,
+                outputs = model(src_ids=src_ids,
                                 attention_mask=attention_mask,
-                                token_type_ids=token_type_ids,
-                                labels=trg_ids)
-                tmp_eval_loss = outputs.loss
-                logits = outputs.logits
+                                trg_ids=trg_ids)
+                tmp_eval_loss = outputs["loss"]
+                prd_ids = outputs["predict_ids"].tolist()
 
-            src_ids = src_ids.tolist()
-            trg_ids = trg_ids.cpu().numpy()
             eval_loss += tmp_eval_loss.mean().item()
-            _, prd_ids = torch.max(logits, -1)
-            prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist()
             for s, t, p in zip(src_ids, trg_ids, prd_ids):
                 all_inputs += [decode(s)]
                 all_labels += [decode(t)]
@@ -622,7 +557,7 @@ def main():
             eval_steps += 1
 
         eval_loss = eval_loss / eval_steps
-        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
+        p, r, f1, fpr, wpr, tp, fp, fn, wp = Metrics.compute_test(all_inputs, all_labels, all_predictions)
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
@@ -636,10 +571,6 @@ def main():
         with open(output_fn_file, "w") as writer:
             for line in fn:
                 writer.write(line + "\n")
-        output_wp_file = os.path.join(args.output_dir, "sents.wp")
-        with open(output_wp_file, "w") as writer:
-            for line in wp:
-                writer.write(line + "\n")
 
         result = {
             "eval_loss": eval_loss,
@@ -647,6 +578,7 @@ def main():
             "eval_r": r * 100,
             "eval_f1": f1 * 100,
             "eval_fpr": fpr * 100,
+            "eval_wpr": wpr*100,
         }
 
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")

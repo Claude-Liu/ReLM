@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Tenso
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from transformers import SchedulerType, get_scheduler
-from transformers import BertPreTrainedModel, BertModel
+from transformers import BertPreTrainedModel, BertModel, GPT2PreTrainedModel, GPT2Model, GPT2ForTokenClassification
 from transformers.modeling_outputs import TokenClassifierOutput
 
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class BertForErrorCorrection(BertPreTrainedModel):
 
-    def __init__(self, config):
+    def __init__(self, config, vocab_size=None):
         super().__init__(config)
         self.num_labels = config.vocab_size
 
@@ -89,6 +89,37 @@ class BertForErrorCorrection(BertPreTrainedModel):
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+        )
+
+class GPT2ForErrorCorrection(GPT2PreTrainedModel):
+    def __init__(self,config):
+        super().__init__(config)
+        self.num_labels = config.vocab_size
+        print(self.num_labels)
+        self.transformer = GPT2Model(config)
+        classifier_dropout=0.1
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size, self.num_labels)
+
+        self.post_init()
+    def forward(self, input_ids, attention_mask, labels):
+        outputs = self.transformer(
+            input_ids,
+            attention_mask=attention_mask,
+        )
+
+        hidden_states = outputs[0]
+        hidden_states = self.dropout(hidden_states)
+        logits = self.classifier(hidden_states)
+
+        loss_fct = nn.CrossEntropyLoss(ignore_index=0) # ignore padding
+        loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions
         )
 
 
@@ -242,13 +273,19 @@ class Metrics:
                 prd_pos_sents.append(difference(s, p))
             if s == p:
                 prd_neg_sents.append(difference(s, p))
-
-        p = 1.0 * len(tp_sents) / len(prd_pos_sents)
-        r = 1.0 * len(tp_sents) / len(pos_sents)
-        f1 = 2.0 * (p * r) / (p + r + 1e-12)
+        if len(pos_sents)==0:
+            p=0
+            r=0
+            f1=0
+            wpr=0
+        else:
+            p = 1.0 * len(tp_sents) / len(prd_pos_sents)
+            r = 1.0 * len(tp_sents) / len(pos_sents)
+            f1 = 2.0 * (p * r) / (p + r + 1e-12)
+            wpr = 1.0 * len(wp_sents) / len(pos_sents)
         fpr = 1.0 * (len(fp_sents) + 1e-12) / (len(neg_sents) + 1e-12)
 
-        return p, r, f1, fpr, tp_sents, fp_sents, fn_sents, wp_sents
+        return p, r, f1, fpr, wpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 
 def mask_tokens(inputs, targets, tokenizer, device, mask_mode="noerror", noise_probability=0.2):
@@ -300,6 +337,8 @@ def main():
                         help="Name of the training task.")
     parser.add_argument("--load_model_path", type=str, default="bert-base-chinese",
                         help="Pre-trained model path to load if needed.")
+    parser.add_argument("--load_tokenizer_path", type=str, default="bert-base-chinese",
+                        help="Pre-trained tokenizer to load.")
     parser.add_argument("--cache_dir", type=str, default="../cache/",
                         help="Directory to store the pre-trained language models downloaded from s3.")
     parser.add_argument("--output_dir", type=str, default="model/",
@@ -355,6 +394,7 @@ def main():
     parser.add_argument("--mft", action="store_true",
                         help="Training with masked-fine-tuning (not published yet).")
     parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
+    parser.add_argument('--model_type',type=str,default='bert')
 
     args = parser.parse_args()
 
@@ -362,6 +402,12 @@ def main():
         "sighan": SighanProcessor,
         "ecspell": EcspellProcessor,
         "sghspell": SighanProcessor,## the data format in sghspell is the same as sighan
+    }
+
+    CSCModel = {
+        'bert': BertForErrorCorrection,
+        'gpt2': GPT2ForErrorCorrection,
+        'gpt2-token': GPT2ForTokenClassification,
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -414,9 +460,12 @@ def main():
         else:
             args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-        model = BertForErrorCorrection.from_pretrained(args.load_model_path,
+        model = CSCModel[args.model_type].from_pretrained(args.load_model_path,
                                                        return_dict=True,
                                                        cache_dir=cache_dir)
+        
+        #if args.model_type=='gpt2-token':
+        #    model.num_labels=tokenizer.vocab_size
         model.to(device)
         if args.load_checkpoint:
             model.load_state_dict(torch.load(args.load_checkpoint))
@@ -436,14 +485,12 @@ def main():
         ]
 
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-        '''
+        
         scheduler = get_scheduler(name=args.lr_scheduler_type,
                                   optimizer=optimizer,
                                   num_warmup_steps=args.max_train_steps * args.warmup_proportion,
                                   num_training_steps=args.max_train_steps)
-        '''
         
-
         scaler = None
         if args.fp16:
             from torch.cuda.amp import autocast, GradScaler
@@ -513,7 +560,7 @@ def main():
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
-                    #scheduler.step()
+                    scheduler.step()
                     global_step += 1
                     progress_bar.update(1)
 
@@ -552,7 +599,7 @@ def main():
     
                     loss = train_loss / global_step
                     eval_loss = eval_loss / eval_steps
-                    p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
+                    p, r, f1, fpr, wpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
     
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
                     with open(output_tp_file, "w") as writer:
@@ -618,7 +665,7 @@ def main():
         eval_sampler = SequentialSampler(eval_data)
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-        model = BertForErrorCorrection.from_pretrained(args.load_model_path,
+        model = CSCModel[args.model_type].from_pretrained(args.load_model_path,
                                                        return_dict=True,
                                                        cache_dir=cache_dir)
         model.to(device)
@@ -660,7 +707,7 @@ def main():
             eval_steps += 1
 
         eval_loss = eval_loss / eval_steps
-        p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
+        p, r, f1, fpr, wpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
@@ -685,6 +732,7 @@ def main():
             "eval_r": r * 100,
             "eval_f1": f1 * 100,
             "eval_fpr": fpr * 100,
+            "eval_wpr": wpr*100,
         }
 
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
