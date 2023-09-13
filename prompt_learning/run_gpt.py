@@ -12,8 +12,10 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Tenso
 import sklearn.metrics as mtc
 from scipy.stats import spearmanr
 from tqdm import tqdm, trange
-from transformers import AutoTokenizer, GPT2LMHeadModel
+from transformers import AutoTokenizer, GPT2LMHeadModel, GPT2PreTrainedModel
 from transformers import SchedulerType, get_scheduler
+from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
+import torch.nn as nn
 #from peft import get_peft_model, LoraConfig, TaskType, PeftModel
 from accelerate import Accelerator
 
@@ -28,6 +30,60 @@ with open("data/database.json") as f:
     db = json.load(f)
 '''
 
+class RegularizedGPT2LMForCSC(GPT2LMHeadModel):
+    def __init__(self,config, lambd):
+        super().__init__(config)
+        self.lambd = lambd
+        self.num_label = config.vocab_size
+        self.softmax = nn.Softmax(-1)
+
+    def kl_divergence(self,p,q):
+        return torch.sum(torch.where(p*q!=0,p*torch.log(p/q),0))
+
+    def forward(self,input_ids,attention_mask,labels,regu_src=None):
+        outputs = self.transformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+
+        '''
+        input_ids: cls + src + sep + trg + sep +pad(0)
+        refu_src: -100 + src + sep + ...-100... + pad(-100)
+        labels:   ...-100...       + trg + sep +pad(-100)
+        '''
+        sequence_output = outputs[0]
+        logits = self.lm_head(sequence_output)
+        if regu_src is not None:
+            shift_inputs = regu_src[..., 1:].contiguous()##(batch,max_seq-1)
+        shift_logits = logits[..., :-1, :].contiguous()##(batch,max_seq-1,vocab)
+        shift_labels = labels[..., 1:].contiguous()
+    
+
+        loss_fct = nn.CrossEntropyLoss()  # -100 index = padding token
+        loss_lm = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        if regu_src is not None: ## apply kl divergence
+            src_mask = (shift_inputs!=-100).unsqueeze(-1).repeat(1,1,self.num_label)
+            src_logits_ = torch.masked_select(shift_logits,src_mask).reshape(-1,self.num_label)
+            src_logits = src_logits_.clone().detach()
+            src_probs = self.softmax(src_logits)
+            trg_mask = (shift_labels!=-100).unsqueeze(-1).repeat(1,1,self.num_label)
+            trg_logits = torch.masked_select(shift_logits,trg_mask).reshape(-1,self.num_label)
+            trg_probs = self.softmax(trg_logits)
+            assert src_probs.shape==trg_probs.shape
+            kl_penalty = self.kl_divergence(src_probs,trg_probs)
+            print(kl_penalty)
+            print(loss_lm)
+            #kl_penalty = self.kl_divergence(shift_input_logits,shift_logits)
+            loss = loss_lm+self.lambd*kl_penalty
+        else:
+            loss = loss_lm
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=logits,
+            hidden_states=sequence_output,
+        )
+    
 class InputExample(object):
     def __init__(self, guid, context=None, source=None, target=None):
         self.guid = guid
@@ -37,10 +93,11 @@ class InputExample(object):
 
 
 class InputFeatures(object):
-    def __init__(self, input_ids, attention_mask, labels):
+    def __init__(self, input_ids, attention_mask, labels, regu_src):
         self.input_ids = input_ids
         self.attention_mask = attention_mask
         self.labels = labels
+        self.regu_src = regu_src
 
 class EcspellProcessor:
     """Processor for the ECSpell data set."""
@@ -89,6 +146,8 @@ def convert_examples_to_features(examples, max_seq_length, tokenizer):
         encoded_inputs["labels"] = [-100] * len(encoded_inputs["input_ids"])
 
         trg_ids= tokenizer(example.target, add_special_tokens=False, is_split_into_words=True)["input_ids"] + [tokenizer.eos_token_id]
+        src_ids= tokenizer(example.source, add_special_tokens=False, is_split_into_words=True)["input_ids"] + [tokenizer.sep_token_id]
+        encoded_inputs['regu_src'] = [-100] + src_ids + [-100]*len(trg_ids)
         encoded_inputs["input_ids"] += trg_ids
         encoded_inputs["labels"] += trg_ids
         encoded_inputs["attention_mask"] = [1] * len(encoded_inputs["input_ids"])
@@ -98,16 +157,18 @@ def convert_examples_to_features(examples, max_seq_length, tokenizer):
         encoded_inputs["input_ids"] = encoded_inputs["input_ids"] + [tokenizer.pad_token_id] * offset_length
         encoded_inputs["attention_mask"] = encoded_inputs["attention_mask"] + [0] * offset_length
         encoded_inputs["labels"] =  encoded_inputs["labels"] + [-100] * offset_length
+        encoded_inputs['regu_src'] += [-100] * offset_length
         
         input_ids = encoded_inputs["input_ids"]
         attention_mask = encoded_inputs["attention_mask"]
         labels = encoded_inputs["labels"]
+        regu_src = encoded_inputs['regu_src']
         tokens = tokenizer.convert_ids_to_tokens(input_ids)
 
         assert len(input_ids) == max_seq_length
         assert len(attention_mask) == max_seq_length
         assert len(labels) == max_seq_length
-
+        
         if i < 5:
             logger.info("*** Example ***")
             logger.info("guid: %s" % example.guid)
@@ -115,15 +176,18 @@ def convert_examples_to_features(examples, max_seq_length, tokenizer):
             logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
             logger.info("attention_mask: %s" % " ".join([str(x) for x in attention_mask]))
             logger.info("labels: %s" % " ".join([str(x) for x in labels]))
+            logger.info("regu_src: %s" % " ".join([str(x) for x in regu_src]))
 
         '''
-        input_ids: cls + src + sep + trg + sep +pad
-        labels:   ...-100...       + trg + sep +pad
+        input_ids: cls + src + sep + trg + sep +pad(0)
+        refu_src: -100 + src + sep + ...-100... + pad(-100)
+        labels:   ...-100...       + trg + sep +pad(-100)
         '''
         features.append(
             InputFeatures(input_ids=input_ids,
                           attention_mask=attention_mask,
-                          labels=labels)
+                          labels=labels,
+                          regu_src=regu_src)
         )
 
     return features
@@ -261,6 +325,8 @@ def main():
     parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
     parser.add_argument("--mask_rate", type=float, default=0.2, help="the percentage we mask the source sentence in mask-ft technique")
 
+    parser.add_argument("--kl_regu", action="store_true")
+    parser.add_argument("--lambd", type=float, default=0.2, help="the value of lambda when we apply regularization")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -305,8 +371,9 @@ def main():
         all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
         all_attention_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
         all_labels = torch.tensor([f.labels for f in train_features], dtype=torch.long)
+        all_regu_src = torch.tensor([f.regu_src for f in train_features], dtype=torch.long)
 
-        train_data = TensorDataset(all_input_ids, all_attention_mask, all_labels)
+        train_data = TensorDataset(all_input_ids, all_attention_mask, all_labels, all_regu_src)
         train_dataloader = DataLoader(train_data, shuffle=True, batch_size=args.train_batch_size)
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -318,8 +385,10 @@ def main():
         accelerator = Accelerator(cpu=args.no_cuda, mixed_precision="fp16" if args.fp16 else "no")
         device = accelerator.device
 
-        model = GPT2LMHeadModel.from_pretrained(args.load_model_path,
-                                                     cache_dir=cache_dir)
+        if args.kl_regu:
+            model = RegularizedGPT2LMForCSC.from_pretrained(args.load_model_path,cache_dir=cache_dir,lambd=args.lambd)
+        else:
+            model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
         
         '''
         if args.lora:
@@ -379,18 +448,28 @@ def main():
             train_steps = 0
             for step, batch in enumerate(train_dataloader):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, attention_mask, labels = batch
+                input_ids, attention_mask, labels, regu_src = batch
                 if args.mft:
                     input_ids = dynamic_mask_token(input_ids, labels, tokenizer, device, noise_probability=args.mask_rate)
                 #print("size of input_ids:{}".format(input_ids.size()))
                 #print("size of label_ids:{}".format(labels.size()))
-                    if step<3:
+                '''
+                if step<3:
                         print("input_ids: {}".format(input_ids[0]))
                         print("input_tokens: {}".format(tokenizer.convert_ids_to_tokens(input_ids[0])))
-
-                outputs = model(input_ids=input_ids,
-                                attention_mask=attention_mask,
-                                labels=labels)
+                '''
+                if args.kl_regu:
+                    outputs = model(input_ids=input_ids,
+                                    attention_mask=attention_mask,
+                                    labels=labels,
+                                    regu_src=regu_src,
+                                )
+                else:
+                    outputs = model(input_ids=input_ids,
+                                    attention_mask=attention_mask,
+                                    labels=labels,
+                                )
+                
                 loss = outputs.loss
 
                 if n_gpu > 1:
@@ -437,7 +516,8 @@ def main():
                         with torch.no_grad():
                             outputs = model(input_ids=input_ids,
                                             attention_mask=attention_mask,
-                                            labels=labels)
+                                            labels=labels,
+                                            )
                             logits = outputs[1]
 
                             shift_inputs = input_ids[..., 1:].contiguous()
@@ -480,7 +560,10 @@ def main():
                     print("all labels size: {}".format(len(all_labels)))
 
                     train_epoch_loss = train_loss / len(train_dataloader)
-                    train_ppl = math.exp(train_epoch_loss)
+                    try:
+                        train_ppl = math.exp(train_epoch_loss)
+                    except:
+                        train_ppl = math.inf
                     p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions)
 
                     output_tp_file = os.path.join(args.output_dir, "sents.tp")
@@ -503,6 +586,7 @@ def main():
                     result = {
                         "global_step": global_step,
                         "train_ppl": train_ppl,
+                        "train_loss": train_epoch_loss,
                         "eval_p": p * 100,
                         "eval_r": r * 100,
                         "eval_f1": f1 * 100,
@@ -540,8 +624,14 @@ def main():
         logger.info("  Num examples = %d", len(eval_examples))
         logger.info("  Batch size = %d", 1)
 
-        predict_model = GPT2LMHeadModel.from_pretrained(args.load_model_path,
-                                                             cache_dir=cache_dir)
+        '''
+        got un unexpected keyword argument past_key_values
+        if args.kl_regu:
+            predict_model = RegularizedGPT2LMForCSC.from_pretrained(args.load_model_path,cache_dir=cache_dir,lambd=args.lambd)
+        else:
+            predict_model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
+        '''
+        predict_model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
         
         #predict_model = PeftModel.from_pretrained(predict_model, args.load_ckpt)
         #predict_model.print_trainable_parameters()

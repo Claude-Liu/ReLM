@@ -410,6 +410,19 @@ CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --task_name "ecspell" --eval_
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --mft --do_eval --task_name "ecspell" --train_on "odw" --eval_on "odw" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_odw" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
 step-3700_f1-67.99.bin
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --task_name "ecspell" --eval_on "odw" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_odw/step-3700_f1-67.99.bin"
+
+## mft+kl_divergence
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --kl_regu --lambd 0.0005 --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+step-2300_f1-50.00.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-2300_f1-50.00.bin"
+43.07/60.81
+
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --kl_regu --lambd 0.0001 --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+step-3600_f1-70.06.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-3600_f1-70.06.bin"
+62.18/54.28
 ```
 
 gpt2-tagging
