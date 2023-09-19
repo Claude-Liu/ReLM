@@ -30,21 +30,86 @@ with open("data/database.json") as f:
     db = json.load(f)
 '''
 
+class PromptEmbeddings(nn.Module):
+    def __init__(self, hidden_size, num_virtual_tokens=10):
+        super().__init__()
+        self.num_virtual_tokens = num_virtual_tokens
+        self.hidden_size = hidden_size
+
+        self.embedding = torch.nn.Embedding(num_virtual_tokens, hidden_size)
+        self.prompt_lstm = nn.LSTM(input_size=self.hidden_size,
+                                   hidden_size=self.hidden_size,
+                                   num_layers=2,
+                                   bidirectional=True,
+                                   batch_first=True)
+        self.prompt_linear = nn.Sequential(nn.Linear(2 * self.hidden_size, self.hidden_size),
+                                           nn.ReLU(),
+                                           nn.Linear(self.hidden_size, self.hidden_size))
+
+    def forward(self, input_ids):
+        input_embeds = self.embedding(input_ids)
+        input_embeds = self.prompt_lstm(input_embeds)[0]
+        output_embeds = self.prompt_linear(input_embeds)
+
+        return output_embeds
+
 class RegularizedGPT2LMForCSC(GPT2LMHeadModel):
-    def __init__(self,config, lambd):
+    def __init__(self,config, lambd,add_prefix=False):
         super().__init__(config)
         self.lambd = lambd
         self.num_label = config.vocab_size
-        self.softmax = nn.Softmax(-1)
+        self.kl_loss = nn.KLDivLoss(reduction="batchmean", log_target=True)
+        self.pe = PromptEmbeddings(hidden_size=config.hidden_size)
+        self.add_prefix = add_prefix
 
-    def kl_divergence(self,p,q):
-        return torch.sum(torch.where(p*q!=0,p*torch.log(p/q),0))
+    def forward(self,input_ids,attention_mask,labels=None,
+                past_key_values=None,
+                token_type_ids=None,
+                position_ids=None,
+                head_mask=None,
+                inputs_embeds=None,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                use_cache=None,
+                output_attentions=None,
+                output_hidden_states=None,
+                return_dict=None,
+                regu_src=None):
 
-    def forward(self,input_ids,attention_mask,labels,regu_src=None):
-        outputs = self.transformer(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        if self.add_prefix:
+            '''
+            print("before adding prefix")
+            print("input_ids size {}".format(input_ids.size()))
+            print("input_ids {}".format(input_ids))
+            print("attention_mask size {}".format(attention_mask.size()))
+            '''
+            batch_size = input_ids.size(0)
+            prefix_attention_mask = torch.ones(batch_size, self.pe.num_virtual_tokens).to(attention_mask.device)
+            attention_mask = torch.cat((prefix_attention_mask, attention_mask), dim=1)
+
+            inputs_embeds = self.transformer.wte(input_ids)
+            indices = torch.arange(self.pe.num_virtual_tokens).unsqueeze(0).expand(batch_size, -1).to(input_ids.device)
+            prompts = self.pe(indices).to(inputs_embeds.dtype)
+            inputs_embeds = torch.cat((prompts, inputs_embeds), dim=1)
+
+            if labels is not None:
+                labels = labels.clone()
+                labels = torch.cat((torch.full_like(indices, -100).to(indices.dtype), labels), dim=1)
+            '''
+            print("prefix added")
+            print("inputs_embeds size {}".format(inputs_embeds.size()))
+            print("attention_mask size {}".format(attention_mask.size()))
+            '''
+            outputs = self.transformer(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+            )
+            #print('----------')
+        else:
+            outputs = self.transformer(
+                input_ids = input_ids,
+                attention_mask=attention_mask,
+            )
 
         '''
         input_ids: cls + src + sep + trg + sep +pad(0)
@@ -53,36 +118,37 @@ class RegularizedGPT2LMForCSC(GPT2LMHeadModel):
         '''
         sequence_output = outputs[0]
         logits = self.lm_head(sequence_output)
-        if regu_src is not None:
+        if not self.add_prefix and regu_src is not None:
             shift_inputs = regu_src[..., 1:].contiguous()##(batch,max_seq-1)
         shift_logits = logits[..., :-1, :].contiguous()##(batch,max_seq-1,vocab)
-        shift_labels = labels[..., 1:].contiguous()
+        if labels is not None:
+            shift_labels = labels[..., 1:].contiguous()
     
-
-        loss_fct = nn.CrossEntropyLoss()  # -100 index = padding token
-        loss_lm = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        if regu_src is not None: ## apply kl divergence
-            src_mask = (shift_inputs!=-100).unsqueeze(-1).repeat(1,1,self.num_label)
-            src_logits_ = torch.masked_select(shift_logits,src_mask).reshape(-1,self.num_label)
-            src_logits = src_logits_.clone().detach()
-            src_probs = self.softmax(src_logits)
-            trg_mask = (shift_labels!=-100).unsqueeze(-1).repeat(1,1,self.num_label)
-            trg_logits = torch.masked_select(shift_logits,trg_mask).reshape(-1,self.num_label)
-            trg_probs = self.softmax(trg_logits)
-            assert src_probs.shape==trg_probs.shape
-            kl_penalty = self.kl_divergence(src_probs,trg_probs)
-            print(kl_penalty)
-            print(loss_lm)
-            #kl_penalty = self.kl_divergence(shift_input_logits,shift_logits)
-            loss = loss_lm+self.lambd*kl_penalty
-        else:
-            loss = loss_lm
+        loss=None
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss()  # -100 index = padding token
+            loss_lm = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            if not self.add_prefix and regu_src is not None: ## apply kl divergence
+                src_mask = (shift_inputs!=-100).unsqueeze(-1).repeat(1,1,self.num_label)
+                src_logits_ = torch.masked_select(shift_logits,src_mask).reshape(-1,self.num_label)
+                src_logits = src_logits_.clone().detach()
+                trg_mask = (shift_labels!=-100).unsqueeze(-1).repeat(1,1,self.num_label)
+                trg_logits = torch.masked_select(shift_logits,trg_mask).reshape(-1,self.num_label)
+                assert src_logits.shape==trg_logits.shape
+                kl_penalty = self.kl_loss(src_logits.log_softmax(-1),trg_logits.log_softmax(-1))
+                print(kl_penalty)
+                print(loss_lm)
+                loss = loss_lm+self.lambd*kl_penalty
+            else:
+                loss = loss_lm
 
         return CausalLMOutputWithCrossAttentions(
             loss=loss,
             logits=logits,
-            hidden_states=sequence_output,
+            #past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
         )
+            
     
 class InputExample(object):
     def __init__(self, guid, context=None, source=None, target=None):
@@ -327,6 +393,8 @@ def main():
 
     parser.add_argument("--kl_regu", action="store_true")
     parser.add_argument("--lambd", type=float, default=0.2, help="the value of lambda when we apply regularization")
+
+    parser.add_argument("--add_prefix", action="store_true")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -385,10 +453,10 @@ def main():
         accelerator = Accelerator(cpu=args.no_cuda, mixed_precision="fp16" if args.fp16 else "no")
         device = accelerator.device
 
-        if args.kl_regu:
-            model = RegularizedGPT2LMForCSC.from_pretrained(args.load_model_path,cache_dir=cache_dir,lambd=args.lambd)
-        else:
-            model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
+        
+        model = RegularizedGPT2LMForCSC.from_pretrained(args.load_model_path,cache_dir=cache_dir,lambd=args.lambd, add_prefix=args.add_prefix)
+        #model.to(device)
+        #model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
         
         '''
         if args.lora:
@@ -442,11 +510,11 @@ def main():
         best_result = list()
         progress_bar = tqdm(range(args.max_train_steps))
         for epoch in range(int(args.num_train_epochs)):
-            model.train()
             train_loss = 0
             num_train_examples = 0
             train_steps = 0
             for step, batch in enumerate(train_dataloader):
+                model.train()
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, attention_mask, labels, regu_src = batch
                 if args.mft:
@@ -458,25 +526,22 @@ def main():
                         print("input_ids: {}".format(input_ids[0]))
                         print("input_tokens: {}".format(tokenizer.convert_ids_to_tokens(input_ids[0])))
                 '''
-                if args.kl_regu:
-                    outputs = model(input_ids=input_ids,
+                if not args.kl_regu:
+                    regu_src=None
+                outputs = model(input_ids=input_ids,
                                     attention_mask=attention_mask,
                                     labels=labels,
                                     regu_src=regu_src,
                                 )
-                else:
-                    outputs = model(input_ids=input_ids,
-                                    attention_mask=attention_mask,
-                                    labels=labels,
-                                )
                 
-                loss = outputs.loss
+                loss = outputs["loss"]
 
                 if n_gpu > 1:
                     loss = loss.mean()
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
                 accelerator.backward(loss)
+                #loss.backward()
 
                 train_loss += loss.item()
                 num_train_examples += input_ids.size(0)
@@ -518,7 +583,9 @@ def main():
                                             attention_mask=attention_mask,
                                             labels=labels,
                                             )
-                            logits = outputs[1]
+                            logits = outputs["logits"]
+                            if args.add_prefix:
+                                logits = logits[:,model.pe.num_virtual_tokens:]
 
                             shift_inputs = input_ids[..., 1:].contiguous()
                             shift_logits = logits[..., :-1, :].contiguous()
@@ -631,8 +698,8 @@ def main():
         else:
             predict_model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
         '''
-        predict_model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
-        
+        #predict_model = GPT2LMHeadModel.from_pretrained(args.load_model_path, cache_dir=cache_dir)
+        predict_model = RegularizedGPT2LMForCSC.from_pretrained(args.load_model_path,cache_dir=cache_dir,lambd=args.lambd,add_prefix=args.add_prefix)
         #predict_model = PeftModel.from_pretrained(predict_model, args.load_ckpt)
         #predict_model.print_trainable_parameters()
         logger.info("pad_token_id = %d", tokenizer.pad_token_id)
@@ -641,7 +708,7 @@ def main():
 
         predict_model.to(device)
         if args.load_state_dict:
-            predict_model.load_state_dict(torch.load(args.load_state_dict))
+            predict_model.load_state_dict(torch.load(args.load_state_dict),strict=False)
         predict_model.eval()
         all_inputs, all_labels, all_predictions = [], [], []
         output_predict_file = os.path.join(args.output_dir, "test_results.txt")
@@ -649,16 +716,19 @@ def main():
             for i,ex in enumerate(tqdm(eval_examples, desc="Testing")):
                 input_ids = tokenizer(ex.source, return_tensors="pt",is_split_into_words=True).input_ids.to(device)
                 attention_mask = tokenizer(ex.source, return_tensors="pt",is_split_into_words=True).attention_mask.to(device)
-                print("input_ids size {}".format(input_ids.size()))
+                #print("input_ids size {}".format(input_ids.size()))
+                #print("attention_mask {}".format(attention_mask.size()))
                 if i<5:
                     logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
+                    logger.info("attention_mask: %s", " ".join([str(x) for x in attention_mask]))
                 trg = ex.target
                 src = ex.source
                 with torch.no_grad():
                     ot = predict_model.generate(input_ids=input_ids,
                                                 attention_mask=attention_mask,
                                                 max_new_tokens=input_ids.size()[1],
-                                                eos_token_id=tokenizer.eos_token_id)
+                                                eos_token_id=tokenizer.eos_token_id,
+                                                )
                                                 
                     pred = tokenizer.convert_ids_to_tokens(ot[0, input_ids.shape[1]:], skip_special_tokens=True)
                     all_inputs+=[src]

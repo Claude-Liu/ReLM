@@ -382,6 +382,7 @@ gpt2-chinese-cluecorpussmall
 | gpt2-base                | 41.52  /11.83/45.16/38.43 | 20.87  /30.29/19.76/22.12 | 34.93  /23.93/35.68/34.21 |
 | gpt2-mft                 | 71.19  /39.59/61.60/84.31 | 35.62  /49.27/29.61/44.69 | 53.77  /47.00/46.22/64.28 |
 | gpt2-mft(control length) | 72.33                     | 46.01                     | 56.02                     |
+| above+prefix(10)         | 72.06/ 39.6               |                           |                           |
 
 f1/fpr/p/r
 
@@ -411,19 +412,39 @@ CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --mft --do_eval --task_name 
 step-3700_f1-67.99.bin
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --task_name "ecspell" --eval_on "odw" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_odw/step-3700_f1-67.99.bin"
 
+
+
 ## mft+kl_divergence
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --kl_regu --lambd 0.002 --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+step-4100_f1-79.20.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-4100_f1-79.20.bin"
+71.82/40.4
+
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --kl_regu --lambd 0.0005 --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
-step-2300_f1-50.00.bin
-CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-2300_f1-50.00.bin"
-43.07/60.81
+step-2800_f1-79.66.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-2800_f1-79.66.bin"
+72.42/38.36
 
-CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --kl_regu --lambd 0.05 --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+step-3100_f1-78.33.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-3100_f1-78.33.bin"
+70.62/40.0
 
-CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --kl_regu --lambd 0.0001 --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
-step-3600_f1-70.06.bin
-CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-3600_f1-70.06.bin"
-62.18/54.28
+
+
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --add_prefix --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+step-4500_f1-79.93.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --add_prefix --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-4500_f1-79.93.bin"
+
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --add_prefix --task_name "ecspell" --eval_on "med" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-4500_f1-79.93.bin"
 ```
+
+| lamda | f1   | fpr  |
+| ----- | ---- | ---- |
+| 0     | 72.3 | 37.9 |
+| 0.05  | 70.6 | 40.0 |
+| 0.002 | 71.8 | 40.4 |
+| 0.005 | 72.4 | 38.3 |
 
 gpt2-tagging
 
@@ -545,4 +566,10 @@ tagging-mft->relm
 | bert-tagging mft | 56.12 |      |      |
 | mdcspell mft     | 67.76 |      |      |
 | bert-relm        | 85.01 |      |      |
+
+
+
+
+
+KL divergence
 
