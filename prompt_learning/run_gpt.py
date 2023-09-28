@@ -192,20 +192,31 @@ class EcspellProcessor:
         for i, (src, trg) in enumerate(lines):
             guid = "%s-%s" % (set_type, i)
             if len(src) == len(trg):
-                if len(src) == len(trg):
-                    examples.append(InputExample(guid=guid, source=src, target=trg))
-        return examples
+                examples.append(InputExample(guid=guid, source=src, target=trg))
+        return examples # (guid,source:[x1,...,xn],target:[y1,...,yn])
     
 
-def convert_examples_to_features(examples, max_seq_length, tokenizer):
+def convert_examples_to_features(examples, max_seq_length, tokenizer, add_arrow):
     features = []
-    max_length=max_seq_length//2-2
     def truncate(x, max_length):
         return x[: max_length]
+    def add_arrow(source,target):
+        new_target=[]
+        for st,tt in zip(source,target):
+            new_target+=[st,'>',tt]
+        return new_target
     for i, example in enumerate(examples):
-        #truncate the source and the target
-        example.source = truncate(example.source,max_length)
-        example.target = truncate(example.target,max_length)
+        #truncate the source and the target and modify the target if needed
+        if add_arrow:
+            max_length = max_seq_length//4-1
+            example.source = truncate(example.source,max_length)
+            example.target = truncate(example.target,max_length)
+            example.target = add_arrow(example.source,example.target)
+            assert len(example.target)%3 == 0
+        else:
+            max_length=max_seq_length//2-2
+            example.source = truncate(example.source,max_length)
+            example.target = truncate(example.target,max_length)
 
         encoded_inputs = tokenizer(example.source, add_special_tokens=True ,is_split_into_words=True)
         #encoded_inputs['input_ids']=[tokenizer.cls_token_id]+encoded_inputs['input_ids']
@@ -284,7 +295,7 @@ class Metrics:
                 if p == s:
                     fn_sents.append(difference(s, t))
                 if (p!=t and p!=s):
-                    wp_sents.append(difference(s,t))
+                    wp_sents.append(difference(t, p))
             # For negative examples
             else:
                 neg_sents.append(difference(s, t))
@@ -395,6 +406,8 @@ def main():
     parser.add_argument("--lambd", type=float, default=0.2, help="the value of lambda when we apply regularization")
 
     parser.add_argument("--add_prefix", action="store_true")
+    parser.add_argument("--beam", type=int, default=1, help="number of beams if we use beam search for generation.")
+    parser.add_argument("--add_arrow", action="store_true", help="if we add arrows in target between characters.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -434,7 +447,7 @@ def main():
 
     if args.do_train:
         train_examples = processor.get_train_examples(os.path.join(args.data_dir, task_name), args.train_on)
-        train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer)
+        train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer, args.add_arrow)
 
         all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
         all_attention_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
@@ -489,7 +502,7 @@ def main():
 
         if args.do_eval:
             eval_examples = processor.get_dev_examples(os.path.join(args.data_dir, task_name), args.eval_on)
-            eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer)
+            eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer, args.add_arrow)
 
             all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
             all_attention_mask = torch.tensor([f.attention_mask for f in eval_features], dtype=torch.long)
@@ -529,9 +542,9 @@ def main():
                 if not args.kl_regu:
                     regu_src=None
                 outputs = model(input_ids=input_ids,
-                                    attention_mask=attention_mask,
-                                    labels=labels,
-                                    regu_src=regu_src,
+                                attention_mask=attention_mask,
+                                labels=labels,
+                                regu_src=regu_src,
                                 )
                 
                 loss = outputs["loss"]
@@ -625,6 +638,33 @@ def main():
                     print("all inputs size: {}".format(len(all_inputs)))
                     print("all predictions size: {}".format(len(all_predictions)))
                     print("all labels size: {}".format(len(all_labels)))
+
+                    # recover the predictions and labels when we use add_arrow
+                    if args.add_arrow:
+                        all_predictions_ = []
+                        all_labels_ = []
+                        all_inputs_ = []
+                        for input, prediction, label in zip(all_inputs, all_predictions, all_labels):
+                            label_ = []
+                            prediction_ = []
+                            if len(label)%3!=0:
+                                continue
+                            for i in range(len(label)//3):
+                                label_.append(label[3*i+2])
+                            all_labels_.append(label_)
+                            for i in range(len(prediction)//3):
+                                prediction_.append(prediction[3*i+2])
+                            all_predictions_.append(prediction_)
+                            all_inputs_.append(input)
+                        all_predictions = all_predictions_
+                        all_labels = all_labels_
+                        all_inputs = all_inputs_
+                        print(all_inputs[0])
+                        print(all_labels[0])
+                        print(all_predictions[0])
+                        print("all inputs size: {}".format(len(all_inputs)))
+                        print("all predictions size: {}".format(len(all_predictions)))
+                        print("all labels size: {}".format(len(all_labels)))
 
                     train_epoch_loss = train_loss / len(train_dataloader)
                     try:
@@ -724,13 +764,31 @@ def main():
                 trg = ex.target
                 src = ex.source
                 with torch.no_grad():
-                    ot = predict_model.generate(input_ids=input_ids,
-                                                attention_mask=attention_mask,
-                                                max_new_tokens=input_ids.size()[1],
-                                                eos_token_id=tokenizer.eos_token_id,
-                                                )
+                    max_new_tokens = 3*input_ids.size()[1] if args.add_arrow else input_ids.size()[1]
+                    
+                    if args.beam!=1:
+                        ot = predict_model.generate(input_ids=input_ids,
+                                                    attention_mask=attention_mask,
+                                                    max_new_tokens=max_new_tokens+10,
+                                                    eos_token_id=tokenizer.eos_token_id,
+                                                    num_beams = args.beam,
+                                                    early_stopping = True,
+                                                    )
+                    else:
+                        ot = predict_model.generate(input_ids=input_ids,
+                                                    attention_mask=attention_mask,
+                                                    max_new_tokens=max_new_tokens+10,
+                                                    eos_token_id=tokenizer.eos_token_id,
+                                                    )
                                                 
                     pred = tokenizer.convert_ids_to_tokens(ot[0, input_ids.shape[1]:], skip_special_tokens=True)
+                    print(pred)
+                    if args.add_arrow:
+                        pred_ = []
+                        for i in range(len(pred)//3):
+                            pred_.append(pred[3*i+2])
+                        pred = pred_
+                        print(pred)
                     all_inputs+=[src]
                     all_labels+=[trg]
                     all_predictions+=[pred]
@@ -740,7 +798,12 @@ def main():
 
         del predict_model
 
-
+        print(all_inputs[0])
+        print(all_labels[0])
+        print(all_predictions[0])
+        print("all inputs size: {}".format(len(all_inputs)))
+        print("all predictions size: {}".format(len(all_predictions)))
+        print("all labels size: {}".format(len(all_labels)))
         p, r, f1, fpr, tp, fp, fn, wp = Metrics.compute(all_inputs, all_labels, all_predictions) ## no need to decode
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")

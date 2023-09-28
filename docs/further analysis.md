@@ -403,6 +403,11 @@ CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --task_name "ecspell" --eval_
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
 step-2800_f1-79.46.bin
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-2800_f1-79.46.bin"
+# add arrow
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --do_eval --mft --add_arrow --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+step-4600_f1-46.04.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --add_arrow --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-4600_f1-46.04.bin"
+f1-38.21, fpr-38.75
 
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --do_eval --mft --task_name "ecspell" --train_on "med" --eval_on "med" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_med" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
 step-4000_f1-62.12.bin
@@ -435,8 +440,19 @@ CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --kl_regu --task_name "ecspel
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --add_prefix --do_eval --mft --task_name "ecspell" --train_on "law" --eval_on "law" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
 step-4500_f1-79.93.bin
 CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --add_prefix --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-4500_f1-79.93.bin"
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --add_prefix --beam 3 --task_name "ecspell" --eval_on "law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-4500_f1-79.93.bin"
+----beam search is not a good idea here.
 
-CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --add_prefix --task_name "ecspell" --eval_on "med" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_law/step-4500_f1-79.93.bin"
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --add_prefix --do_eval --mft --task_name "ecspell" --train_on "med" --eval_on "med" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_med" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+step-3700_f1-68.20.bin
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_test --add_prefix --task_name "ecspell" --eval_on "med" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --load_state_dict "model/model_med/step-3700_f1-68.20.bin"
+
+
+##to do
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --add_prefix --do_eval --mft --task_name "ecspell" --train_on "med" --eval_on "med" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_med" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
+
+##to do
+CUDA_VISIBLE_DEVICES=0 python run_gpt.py --do_train --add_prefix --do_eval --mft --task_name "ecspell" --train_on "odw" --eval_on "odw" --save_step 100 --learning_rate 5e-5 --train_batch_size 32 --eval_batch_size 32 --output_dir "model/model_law" --load_model_path "../cache/gpt2-chinese" --load_tokenizer_path "bert-base-chinese" --fp16 --max_train_steps 5000
 ```
 
 | lamda | f1   | fpr  |
