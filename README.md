@@ -1,2 +1,2 @@
 # Prompt-for-CSC
-apply prompt in Chinese Spelling Correction tasks
+use Rephrasing Language Model (ReLM) to do Chinese Spelling Correction.
