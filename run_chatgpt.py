@@ -14,15 +14,23 @@ logger = logging.getLogger(__name__)
 
 #################chatGPT API########################
 class ChatGPT4CSC(object):
-    def __init__(self,key_file,message_file=None):
+    def __init__(self,key_file,message_file=None, prompt_examples = None, key_id=0):
         self.key_file=key_file
+        self.key_id = key_id
         self.openai_key=None
         self.messages={"role": "system", "content": "你是一个中文拼写错误修改助手"}
         self.message_file=message_file##directory to store the chat messages if neccesary
+        self.prefix = "请修改句子中的拼写错误，要求修改后的句子和原句长度相同, 如果句子中没有错误，请直接照抄原句。\n"
+        self.icl_prompt = ""
+        if prompt_examples is not None:
+            for example in prompt_examples:
+                src = "".join(example.src)
+                trg = "".join(example.trg)
+                self.icl_prompt += src + '\n' + trg + '\n'
     
     def get_api_key(self):
         with open(self.key_file, 'r', encoding='utf-8') as f:
-            self.openai_key = json.load(f)[0]["api_key"]
+            self.openai_key = json.load(f)[self.key_id]["api_key"]
             openai.api_key=self.openai_key
     
     def gptCorrect(self,src):
@@ -30,7 +38,7 @@ class ChatGPT4CSC(object):
                 model="gpt-3.5-turbo",
                 messages=[
                         {"role": "system", "content": "你是一个中文拼写错误修改助手"},
-                        {"role": "user", "content": "请修改句子中的拼写错误，要求修改后的句子和原句长度相同, 如果句子中没有错误，请直接照抄原句：{}".format(src)},
+                        {"role": "user", "content":  self.prefix + self.icl_prompt + src},
                     ]
                 )
         return result.get("choices")[0].get("message").get("content") ## the response of chatgpt
@@ -188,10 +196,14 @@ def main():
                         help="Directory to contain the input data for all tasks.")
     parser.add_argument("--task_name", type=str, default="ecspell",
                         help="Name of the training task.")
-    parser.add_argument("--test_on", type=str, default="s",help="Choose a dev set.")
+    parser.add_argument("--train_on", type=str, default="law",help="Choose a set where the few shot learning examples come from")
+    parser.add_argument("--test_on", type=str, default="law",help="Choose a dev set.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
     parser.add_argument("--begin",type=int,default=None)
+
+    parser.add_argument("--few_shot", type=int, default =0, help='if we apply few shot in context learning and the number of shots.')
+    parser.add_argument("--key_id", default=0,type=int)
     
     args = parser.parse_args()
     if args.use_chatgpt:
@@ -204,34 +216,42 @@ def main():
         if task_name not in processors:
             raise ValueError("Task not found: %s" % task_name)
         processor = processors[task_name]()
-        ### initialize the chatgpt############
-        chat=ChatGPT4CSC(key_file=args.key_file)
+        # get examples for icl
+        if args.few_shot != 0:
+            examples = processor.get_train_examples(os.path.join(args.data_dir,args.task_name),division=args.train_on)
+            prompt_examples = examples[:args.few_shot]
+        else:
+            prompt_examples = None
+        # initialize the chatgpt
+        chat=ChatGPT4CSC(key_file=args.key_file, prompt_examples=prompt_examples, key_id=args.key_id)
         chat.get_api_key()
         logger.info("api_key: %s",chat.openai_key)
-        ### load the data#####################
+        # load the data
         test_examples=processor.get_test_examples(os.path.join(args.data_dir,args.task_name),division=args.test_on)##[example(.src,.trg,.guid)]
         all_preds=[]
         all_srcs=[]
         all_trgs=[]
         messages=[]
         for i,example in enumerate(tqdm(test_examples,desc="Test")):
+            if args.begin is not None and i<args.begin:
+                continue
             while(1):
-                if args.begin is not None and i<args.begin:
-                    continue
+                logger.info("-----{}-----".format(i))
                 try:
                     src=example.src##[t1,t2,...,tn]
                     trg=example.trg
                     prediction=chat.gptCorrect("".join(src))
-                    if i%100 == 0 or (i%10==0 and i<100):
-                        logger.info("src: %s \n prediction: %s", "".join(src),prediction)
-                    all_preds.append(list(prediction))
-                    all_srcs.append(src)
-                    all_trgs.append(trg)
-                    messages.append({"src":"".join(src),"trg":"".join(trg), "pred":prediction})
-                    break
                 except:
+                    logger.info("---\n")
                     time.sleep(5)
                     continue
+                if i%100 == 0 or (i%10==0 and i<100):
+                    logger.info("src: %s \n prediction: %s", "".join(src),prediction)
+                all_preds.append(list(prediction))
+                all_srcs.append(src)
+                all_trgs.append(trg)
+                messages.append({"src":"".join(src),"trg":"".join(trg), "pred":prediction})
+                break
         with open(args.message_file, 'w', encoding='utf-8') as f:
             json.dump(messages,f, ensure_ascii=False,indent=4)
     else:
