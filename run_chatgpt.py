@@ -12,7 +12,7 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-#################chatGPT API########################
+# chatGPT API
 class ChatGPT4CSC(object):
     def __init__(self,key_file,message_file=None, prompt_examples = None, key_id=0):
         self.key_file=key_file
@@ -43,43 +43,12 @@ class ChatGPT4CSC(object):
                 )
         return result.get("choices")[0].get("message").get("content") ## the response of chatgpt
     
-####################### data processor###################################
+# data processor
 class InputExample(object):
     def __init__(self, guid, src, trg):
         self.guid = guid
         self.src = src
         self.trg = trg
-
-class SighanProcessor:
-    """Processor for the Sighan data set."""
-
-    def get_train_examples(self, data_dir, division="all"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "train_{}.txt".format(division))), "train")
-
-    def get_dev_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "dev")
-
-    def get_test_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
-
-    @staticmethod
-    def _read_csv(input_file):
-        with open(input_file, "r", encoding="utf-8") as f:
-            lines = []
-            for line in f:
-                src, trg = line.strip().split("\t")
-                lines.append((src.split(), trg.split()))
-            return lines
-
-    @staticmethod
-    def _create_examples(lines, set_type):
-        examples = []
-        for i, (src, trg) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            if len(src) == len(trg):
-                examples.append(InputExample(guid=guid, src=src, trg=trg))
-        return examples
-
 
 class EcspellProcessor:
     """Processor for the ECSpell data set."""
@@ -111,24 +80,6 @@ class EcspellProcessor:
                 if len(src) == len(trg):
                     examples.append(InputExample(guid=guid, src=src, trg=trg))
         return examples
-    
-class SQProcessor:
-
-    def get_test_examples(self, data_dir, division="s"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
-
-    @staticmethod
-    def _read_csv(input_file):
-        lines=[]
-        with open(input_file,'r',encoding='utf-8')as f:
-            for _,line in enumerate(f):
-                if _==0:
-                    continue
-                text,question,label = line.split('\t')
-                label=label.strip()
-                text = "\n".join([text,question])
-                lines.append((text,label))
-        return lines
 
     @staticmethod
     def _create_examples(lines, set_type):
@@ -152,8 +103,8 @@ class Metrics:
             if len(src)!=len(trg):
                 return False
             for i,(st,tt) in enumerate(zip(src,trg)):
+                # we do not consider the punctuation
                 if st not in ['.','。',',','，','?','？',':','：'] and st!=tt:
-                    ##print("{}->{}".format(st,tt))
                     return False
             return True
         pos_sents, neg_sents, tp_sents, fp_sents, fn_sents, prd_pos_sents, prd_neg_sents, wp_sents  = [], [], [], [], [], [], [], []
@@ -200,7 +151,6 @@ def main():
     parser.add_argument("--test_on", type=str, default="law",help="Choose a dev set.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
-    parser.add_argument("--begin",type=int,default=None)
 
     parser.add_argument("--few_shot", type=int, default =0, help='if we apply few shot in context learning and the number of shots.')
     parser.add_argument("--key_id", default=0,type=int)
@@ -208,9 +158,7 @@ def main():
     args = parser.parse_args()
     if args.use_chatgpt:
         processors = {
-            "sighan": SighanProcessor,
             "ecspell": EcspellProcessor,
-            "sq": SQProcessor,
         }
         task_name = args.task_name.lower()
         if task_name not in processors:
@@ -233,12 +181,10 @@ def main():
         all_trgs=[]
         messages=[]
         for i,example in enumerate(tqdm(test_examples,desc="Test")):
-            if args.begin is not None and i<args.begin:
-                continue
             while(1):
                 logger.info("-----{}-----".format(i))
                 try:
-                    src=example.src##[t1,t2,...,tn]
+                    src=example.src #[t1,t2,...,tn]
                     trg=example.trg
                     prediction=chat.gptCorrect("".join(src))
                 except:

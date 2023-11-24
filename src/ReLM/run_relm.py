@@ -27,7 +27,7 @@ class PTuningWrapper(nn.Module):
     def __init__(self, model, prompt_length):
         super().__init__()
         self.config = model.config
-        self.prompt_length = prompt_length##here we assume that the two period of prompts are both of length prompt_length
+        self.prompt_length = prompt_length
 
         self.model = model
         self.model_type = self.config.model_type.split("-")[0]
@@ -35,9 +35,6 @@ class PTuningWrapper(nn.Module):
 
         self.hidden_size = self.config.embedding_size if hasattr(self.config, "embedding_size") else self.config.hidden_size
         self.prompt_embeddings = nn.Embedding(2*self.prompt_length, self.hidden_size)
-        ##LSTM:
-        ##input:(batch,seq,input_size)
-        ##output[0]:(batch,seq,2*hidden)
         self.prompt_lstm = nn.LSTM(input_size=self.hidden_size,
                                    hidden_size=self.hidden_size,
                                    num_layers=2,
@@ -55,20 +52,15 @@ class PTuningWrapper(nn.Module):
         token_type_ids=None,
         prompt_mask=None,##(batch,msl)
         labels=None,
-        do_train=True
+        apply_prompt=True,
     ):
         if inputs_embeds==None:
             inputs_embeds = self.word_embeddings(input_ids)##inputs_embeds(batch,seq,hidden)
+        if apply_prompt:
             replace_embeds = self.prompt_embeddings(torch.LongTensor(list(range(2*self.prompt_length))).to(input_ids.device))
-
-            if do_train:
-                replace_embeds = replace_embeds.unsqueeze(0)##(1,2*prompt_length,hidden_size)
-                replace_embeds = self.prompt_lstm(replace_embeds)[0]##(2*prompt_length,2*hidden_size)
-                replace_embeds = self.prompt_linear(replace_embeds).squeeze()##(2*prompt_length,hidden_size)
-            ##prompt_mask(batch,seq)-->blocked_indices:(batch,2*prompt_length)
-            ##p1,p2,p3,x1,...xn,p4,p5,p6,m1,...mn
-            ## maybe x1,...xn,p1,p2,p3,m1,...mn is better??
-            ## (batch,2*prompt_length)
+            replace_embeds = replace_embeds.unsqueeze(0)##(1,2*prompt_length,hidden_size)
+            replace_embeds = self.prompt_lstm(replace_embeds)[0]##(2*prompt_length,2*hidden_size)
+            replace_embeds = self.prompt_linear(replace_embeds).squeeze()##(2*prompt_length,hidden_size)
             blocked_indices = (prompt_mask == 1).nonzero().reshape((input_ids.shape[0], 2*self.prompt_length, 2))[:, :, 1]##indices of the prompts p, 
             for i in range(input_ids.shape[0]):
                 for j in range(blocked_indices.shape[1]):
@@ -98,37 +90,6 @@ class InputFeatures(object):
         self.trg_ids = trg_ids
         self.trg_ref_ids = trg_ref_ids
         self.block_flag = block_flag
-
-
-class SighanProcessor:
-    """Processor for the Sighan data set."""
-
-    def get_train_examples(self, data_dir, division="all"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "train_{}.txt".format(division))), "train")
-
-    def get_dev_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "dev")
-
-    def get_test_examples(self, data_dir, division="15"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
-
-    @staticmethod
-    def _read_csv(input_file):
-        with open(input_file, "r", encoding="utf-8") as f:
-            lines = []
-            for line in f:
-                src, trg = line.strip().split("\t")
-                lines.append((src.split(), trg.split()))
-            return lines
-
-    @staticmethod
-    def _create_examples(lines, set_type):
-        examples = []
-        for i, (src, trg) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            if len(src) == len(trg):
-                examples.append(InputExample(guid=guid, src=src, trg=trg))
-        return examples
 
 
 class EcspellProcessor:
@@ -161,7 +122,7 @@ class EcspellProcessor:
                 examples.append(InputExample(guid=guid, src=src, trg=trg))
         return examples
 
-
+# adapt the input for ReLM
 def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_length, static_mask=False, mask_mode="noerror", anchor=None, mask_rate=0.2):
     features = []
     for i, example in enumerate(examples):
@@ -221,7 +182,7 @@ def convert_examples_to_features(examples, max_seq_length, tokenizer, prompt_len
         )
     return features
 
-
+# adapt the input for ReLM
 def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, static_mask=False, mask_mode="noerror", anchor=None, mask_rate=0.2):
     def truncate(x, max_length):
         return x[: max_length]
@@ -317,9 +278,12 @@ class Metrics:
         return p, r, f1, fpr, wpr, tp_sents, fp_sents, fn_sents, wp_sents
 
 def dynamic_mask_token(inputs, targets, tokenizer, device, mask_mode="noerror", noise_probability=0.2):
+    '''
+    the masked-FT proposed in 'Rethinking Masked Language Model for Chinese Spelling Correction'
+    '''
     #src:[CLS]...[CLS],x1,x2,...,xn,[SEP],...,[SEP],m1,m2,...,mn
     #trg:[CLS]...[CLS],t1,t2,...,tn,[SEP],...,[SEP],t1,t2,...,tn
-    ## mask_mode in ["all","error","noerror"]
+    
     inputs = inputs.clone()
     probability_matrix = torch.full(inputs.shape, noise_probability).to(device)
     #do not mask sepcail tokens
@@ -327,8 +291,9 @@ def dynamic_mask_token(inputs, targets, tokenizer, device, mask_mode="noerror", 
         tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in inputs.tolist()
     ]
     special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool).to(device)
-
     probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+    
+    # mask_mode in ["all","error","noerror"]
     if mask_mode == "noerror":
         probability_matrix.masked_fill_(inputs!=targets, value=0.0)
     elif mask_mode == "error":
@@ -413,12 +378,12 @@ def main():
     parser.add_argument("--mask_mode", type=str, default="noerror", help="noerror,error or all")
     parser.add_argument("--mask_rate", type=float, default=0.2, help="the percentage we mask the source sentence in mask-ft technique")
 
+    parser.add_argument("--apply_prompt", action="store_true",)
+
     args = parser.parse_args()
 
     processors = {
-        "sighan": SighanProcessor,
         "ecspell": EcspellProcessor,
-        "sghspell": SighanProcessor
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -471,16 +436,16 @@ def main():
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-        ##len(train_dataloader)=len(examples)/batch_size
+
         if args.max_train_steps is None:
             args.max_train_steps = int(args.num_train_epochs * num_update_steps_per_epoch)
         else:
             args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-        ##we use mlm to do correction
+        ##we use BERTMLM as the backbone for ReLM
         model = BertForMaskedLM.from_pretrained(args.load_model_path,
                                                 return_dict=True,
                                                 cache_dir=cache_dir)
-        model = PTuningWrapper(model, args.prompt_length)##apply p-tuning(prompt) to the model 
+        model = PTuningWrapper(model, args.prompt_length)
         model.to(device)
         if args.load_state_dict:
             model.load_state_dict(torch.load(args.load_state_dict))
@@ -509,9 +474,7 @@ def main():
         
         '''
         
-        
-        #######################################################################
-        if args.freeze_lm:##freeze the parameters in the lm except prompt parameters
+        if args.freeze_lm: # freeze the parameters in the lm except prompt parameters
             prompt_params = ["prompt_embeddings", "prompt_lstm", "prompt_linear"]
             for n, p in model.named_parameters():
                 if not any(nd in n for nd in prompt_params):##why not nd==n
@@ -561,17 +524,21 @@ def main():
                 trg_ids[(src_ids == trg_ids)] = -100 ##ignore index = -100
                 if args.fp16:
                     with autocast():
+                        # you get deactivate the prompt by
+                        # setting prompt length as 1, and apply_prompt as False
                         outputs = model(input_ids=src_ids,
                                         attention_mask=attention_mask,
                                         prompt_mask=block_flag,
                                         labels=trg_ids,
-                                        do_train=True)
+                                        apply_prompt=args.apply_prompt)
                 else:
+                    # you get deactivate the prompt by
+                    # setting prompt length as 1, and apply_prompt as False
                     outputs = model(input_ids=src_ids,
                                     attention_mask=attention_mask,
                                     prompt_mask=block_flag,
                                     labels=trg_ids,
-                                    do_train=True)
+                                    apply_prompt=args.apply_prompt)
                 loss = outputs.loss
 
                 if n_gpu > 1:
@@ -614,27 +581,27 @@ def main():
                         src_ids, attention_mask, trg_ids, block_flag = batch
 
                         with torch.no_grad():
-                            outputs = model(input_ids=src_ids,## give the emeddings directly
+                            outputs = model(input_ids=src_ids,
                                             attention_mask=attention_mask,
                                             labels=trg_ids,
                                             prompt_mask=block_flag,
-                                            do_train=True)##??
+                                            apply_prompt=args.apply_prompt)
                             tmp_eval_loss = outputs.loss
                             logits = outputs.logits
 
                         src_ids = src_ids.tolist()
                         trg_ids = trg_ids.cpu().numpy()
                         eval_loss += tmp_eval_loss.mean().item()
-                        _, prd_ids = torch.max(logits, -1)##(batch,seq)
-                        prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist()##set the padding part to 0
+                        _, prd_ids = torch.max(logits, -1) #(batch,seq)
+                        prd_ids = prd_ids.masked_fill(attention_mask == 0, 0).tolist() #set the padding part to 0
                         for s, t, p in zip(src_ids, trg_ids, prd_ids):
 
                             mapped_src = []
                             mapped_trg = []
                             mapped_prd = []
-                            flag = False## if we pass to the target part
-                            ##src: [CLS]+[CLS]...+src+[SEP]...+[mask]
-                            ##trg: [CLS]+[CLS]...+src+[SEP]...+trg
+                            flag = False  # if we arrive at the target part
+                            # src: [CLS]+[CLS]...+src+[SEP]...+[mask]
+                            # trg: [CLS]+[CLS]...+src+[SEP]...+trg
                             for st, tt, pt in zip(s, t, p):
                                 if st == tokenizer.sep_token_id:
                                     flag = True
@@ -642,18 +609,18 @@ def main():
                                     mapped_src += [st]
                                 else:
                                     mapped_trg += [tt]
-                                    if st == tokenizer.mask_token_id:##we only predict the masked tokens
+                                    if st == tokenizer.mask_token_id: # we only predict the masked tokens
                                         mapped_prd += [pt]
                                     else:
                                         mapped_prd += [st]
                             if anchor is not None:
-                                ##src: [CLS]+[CLS]...+src+anchor+[SEP]...+[mask]
-                                ##trg: [CLS]+[CLS]...+src+anchor+[SEP]...+trg
-                                ## remove the anchor tokens from the src
+                                # src: [CLS]+[CLS]...+src+anchor+[SEP]...+[mask]
+                                # trg: [CLS]+[CLS]...+src+anchor+[SEP]...+trg
+                                # remove the anchor tokens from the src
                                 anchor_length = len(anchor)
                                 del mapped_trg[:anchor_length]
                                 del mapped_prd[:anchor_length]
-                            ## we skip special tokens including '[UNK]','[SEP]'
+                            # we skip special tokens like '[UNK]','[SEP]'
                             all_inputs += [decode(mapped_src)]
                             all_labels += [decode(mapped_trg)]
                             all_predictions += [decode(mapped_prd)]
@@ -759,7 +726,7 @@ def main():
                                 attention_mask=attention_mask,
                                 labels=trg_ids,
                                 prompt_mask=block_flag,
-                                do_train=True)##??
+                                apply_prompt=args.apply_prompt)
                 tmp_eval_loss = outputs.loss
                 logits = outputs.logits
 
