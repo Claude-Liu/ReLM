@@ -308,8 +308,7 @@ class EcspellProcessor:
             guid = "%s-%s" % (set_type, i)
             task = task_csc
             if len(src) == len(trg):
-                if len(src) == len(trg):
-                    examples.append(InputExample(guid=guid, text_a=src, label=trg, task=task))
+                examples.append(InputExample(guid=guid, text_a=src, label=trg, task=task))
         return examples
 
 def convert_examples_to_prompts(src, trg, prompt_length, max_seq_length, tokenizer, anchor=None, mask_rate=0.2):

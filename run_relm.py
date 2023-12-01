@@ -206,7 +206,7 @@ def main():
                         help="Name of the training task.")
     parser.add_argument("--load_model_path", type=str, default="bert-base-chinese",
                         help="Pre-trained model path to load if needed.")
-    parser.add_argument("--cache_dir", type=str, default="cache/",
+    parser.add_argument("--cache_dir", type=str, default="../../cache/",
                         help="Directory to store the pre-trained language models downloaded from s3.")
     parser.add_argument("--output_dir", type=str, default="model/",
                         help="Directory to output predictions and checkpoints.")
