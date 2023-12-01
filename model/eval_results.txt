@@ -1,6 +1,0 @@
-eval precision = 36.36 | eval recall = 42.35 | eval f1 = 39.13 | eval fp rate = 26.94
-eval precision = 43.27 | eval recall = 46.67 | eval f1 = 44.91 | eval fp rate = 17.14
-eval precision = 46.96 | eval recall = 52.26 | eval f1 = 49.47 | eval fp rate = 20.94
-eval precision = 28.09 | eval recall = 37.17 | eval f1 = 32.00 | eval fp rate = 32.12
-eval precision = 53.43 | eval recall = 55.64 | eval f1 = 54.51 | eval fp rate = 13.68
-eval precision = 26.96 | eval recall = 38.05 | eval f1 = 31.56 | eval fp rate = 36.13

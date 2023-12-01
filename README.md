@@ -85,3 +85,4 @@ CUDA_VISIBLE_DEVICES=0 python run_relm_multi.py \
     --output_dir "model/model_multi" 
 ```
 
+
