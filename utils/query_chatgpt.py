@@ -6,6 +6,7 @@ import copy
 import logging
 import time
 from tqdm import *
+from utils.data_processor import EcspellProcessor
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
                     datefmt="%m/%d/%Y %H:%M:%S",
@@ -42,52 +43,6 @@ class ChatGPT4CSC(object):
                     ]
                 )
         return result.get("choices")[0].get("message").get("content") ## the response of chatgpt
-    
-# data processor
-class InputExample(object):
-    def __init__(self, guid, src, trg):
-        self.guid = guid
-        self.src = src
-        self.trg = trg
-
-class EcspellProcessor:
-    """Processor for the ECSpell data set."""
-
-    def get_train_examples(self, data_dir, division="law"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "train_{}.txt".format(division))), "train")
-
-    def get_dev_examples(self, data_dir, division="law"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "dev")
-
-    def get_test_examples(self, data_dir, division="law"):
-        return self._create_examples(self._read_csv(os.path.join(data_dir, "test_{}.txt".format(division))), "test")
-
-    @staticmethod
-    def _read_csv(input_file):
-        with open(input_file, "r", encoding="utf-8") as f:
-            lines = []
-            for line in f:
-                src, trg = line.strip().split("\t")
-                lines.append((src.split(), trg.split()))
-            return lines
-
-    @staticmethod
-    def _create_examples(lines, set_type):
-        examples = []
-        for i, (src, trg) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            if len(src) == len(trg):
-                if len(src) == len(trg):
-                    examples.append(InputExample(guid=guid, src=src, trg=trg))
-        return examples
-
-    @staticmethod
-    def _create_examples(lines, set_type):
-        examples = []
-        for i, (text, label) in enumerate(lines):
-            guid = "%s-%s" % (set_type, i)
-            examples.append(InputExample(guid=guid, src=text, trg=label))
-        return examples
 
 class Metrics:
     @staticmethod

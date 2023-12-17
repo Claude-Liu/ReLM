@@ -366,7 +366,6 @@ def main():
         scaler = None
         if args.fp16:##use half precision to reduce the memory usage of neural networks
             from torch.cuda.amp import autocast, GradScaler
-
             scaler = GradScaler()
         
         if args.do_eval:
