@@ -6,7 +6,7 @@ import copy
 import logging
 import time
 from tqdm import *
-from utils.data_processor import EcspellProcessor
+from data_processor import EcspellProcessor
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
                     datefmt="%m/%d/%Y %H:%M:%S",
@@ -98,13 +98,13 @@ def main():
     parser.add_argument("--load_messages",action="store_true")
     parser.add_argument("--key_file",type=str,default="../envs/openai_key",help="the file containing the api key")
     parser.add_argument("--message_file",type=str,default="model/messages_odw.json",help="the file to store the chat messages")
-    parser.add_argument("--data_dir", type=str, default="../data/csc/",
+    parser.add_argument("--data_dir", type=str, default="../data/",
                         help="Directory to contain the input data for all tasks.")
     parser.add_argument("--task_name", type=str, default="ecspell",
                         help="Name of the training task.")
     parser.add_argument("--train_on", type=str, default="law",help="Choose a set where the few shot learning examples come from")
     parser.add_argument("--test_on", type=str, default="law",help="Choose a dev set.")
-    parser.add_argument("--output_dir", type=str, default="model/",
+    parser.add_argument("--output_dir", type=str, default="../model/",
                         help="Directory to output predictions and checkpoints.")
 
     parser.add_argument("--few_shot", type=int, default =0, help='if we apply few shot in context learning and the number of shots.')
