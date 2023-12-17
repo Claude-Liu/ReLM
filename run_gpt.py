@@ -410,7 +410,8 @@ def main():
             eval_dataloader = DataLoader(eval_data, shuffle=False, batch_size=args.eval_batch_size)
 
         model, optimizer, scheduler, train_dataloader = accelerator.prepare(model, optimizer, scheduler, train_dataloader)
-
+        
+    if args.do_train:
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
