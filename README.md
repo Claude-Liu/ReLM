@@ -10,7 +10,7 @@ This is the repo for AAAI 2024 paper [Chinese Spelling Correction as Rephrasing 
 
 Rephrasing Language Model (ReLM) is trained to rephrase the entire sentence by infilling additional slots, instead of character-to-character tagging.  We also evaluate the transferability of ReLM in multi-task settings. You can find some architectures in recent CSC papers and *ReLM* pre-trained model which is a rephrasing language model trained based on bert-base-chinese and 34 million monolingual data from [the repo of Rethinking Masked Language Modeling for Chinese Spelling Correction](https://github.com/gingasan/lemon).
 
-
+![](data/relm.png)
 
 ## Experiments
 
