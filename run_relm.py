@@ -243,7 +243,7 @@ def main():
                         help="Total number of training epochs to perform.")
     parser.add_argument("--max_train_steps", type=int, default=None,
                         help="Total number of training steps to perform. If provided, overrides training epochs.")
-    parser.add_argument("--lr_scheduler_type", type=SchedulerType, default="linear",
+    parser.add_argument("--lr_scheduler_type", type=SchedulerType, default="constant",
                         help="Scheduler type for learning rate warmup.")
     parser.add_argument("--warmup_proportion", type=float, default=0.1,
                         help="Proportion of training to perform learning rate warmup for.")
@@ -268,6 +268,7 @@ def main():
     parser.add_argument("--mask_rate", type=float, default=0.2, help="the percentage we mask the source sentence in mask-ft technique")
 
     parser.add_argument("--apply_prompt", action="store_true",)
+    parser.add_argument("--response_file",type=str)
 
     args = parser.parse_args()
 
@@ -295,11 +296,9 @@ def main():
         torch.save(args, os.path.join(args.output_dir, "train_args.bin"))
 
 
-    task_name = args.task_name.lower()
-    if task_name not in processors:
-        raise ValueError("Task not found: %s" % task_name)
+    #task_name = args.task_name.lower()
 
-    processor = processors[task_name]()
+    processor = processors['ecspell']()
 
     cache_dir = args.cache_dir
     tokenizer = AutoTokenizer.from_pretrained(args.load_model_path,
@@ -312,7 +311,7 @@ def main():
         anchor=[tokenizer.sep_token]+[t for t in args.anchor]
 
     if args.do_train:
-        train_examples = processor.get_train_examples(os.path.join(args.data_dir, task_name), args.train_on)
+        train_examples = processor.get_train_examples(args.data_dir, args.train_on)
         train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer, args.prompt_length, anchor=anchor)
         all_input_ids = torch.tensor([f.src_ids for f in train_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.attention_mask for f in train_features], dtype=torch.long)
@@ -356,6 +355,13 @@ def main():
         ## set the Adam optimizer
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
         
+        
+        scheduler = get_scheduler(name=args.lr_scheduler_type,
+                                  optimizer=optimizer,
+                                  num_warmup_steps=args.max_train_steps * args.warmup_proportion,
+                                  num_training_steps=args.max_train_steps)
+        
+
         if args.freeze_lm: # freeze the parameters in the lm except prompt parameters
             prompt_params = ["prompt_embeddings", "prompt_lstm", "prompt_linear"]
             for n, p in model.named_parameters():
@@ -369,7 +375,7 @@ def main():
             scaler = GradScaler()
         
         if args.do_eval:
-            eval_examples = processor.get_dev_examples(os.path.join(args.data_dir, task_name), args.eval_on)
+            eval_examples = processor.get_dev_examples(args.data_dir, args.eval_on)
             eval_features = convert_examples_to_features(eval_examples, args.max_seq_length,  tokenizer, args.prompt_length, anchor=anchor)##never mask the source during evaluation
 
             all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
@@ -394,6 +400,7 @@ def main():
         for _ in range(int(args.num_train_epochs)):
             train_loss = 0
             num_train_examples = 0
+            train_steps = 0
             if wrap: break
             for step, batch in enumerate(train_dataloader):
                 model.train()
@@ -433,6 +440,7 @@ def main():
 
                 train_loss += loss.item()
                 num_train_examples += src_ids.size(0)
+                train_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                     if args.fp16:
                         scaler.unscale_(optimizer)
@@ -441,6 +449,7 @@ def main():
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
+                    scheduler.step()
                     global_step += 1
                     progress_bar.update(1)
 
@@ -459,11 +468,13 @@ def main():
                     for batch in tqdm(eval_dataloader, desc="Evaluation"):
                         batch = tuple(t.to(device) for t in batch)
                         src_ids, attention_mask, trg_ids, block_flag = batch
+                        trg_ids_ = trg_ids.clone()
+                        trg_ids_[(src_ids == trg_ids)] = -100 ##ignore index = -100
 
                         with torch.no_grad():
                             outputs = model(input_ids=src_ids,
                                             attention_mask=attention_mask,
-                                            labels=trg_ids,
+                                            labels=trg_ids_,
                                             prompt_mask=block_flag,
                                             apply_prompt=args.apply_prompt)
                             tmp_eval_loss = outputs.loss
@@ -507,7 +518,7 @@ def main():
 
                         eval_steps += 1
     
-                    loss = train_loss / global_step
+                    loss = train_loss / train_steps
                     eval_loss = eval_loss / eval_steps
                     p, r, f1, fpr, wpr, tp, fp, fn, wp = Metrics.csc_compute(all_inputs, all_labels, all_predictions)
     
@@ -565,7 +576,7 @@ def main():
                     break
 
     if args.do_test:
-        eval_examples = processor.get_test_examples(os.path.join(args.data_dir, task_name), args.test_on)
+        eval_examples = processor.get_test_examples(args.data_dir, args.test_on)
         eval_features = convert_examples_to_features(eval_examples, args.max_seq_length, tokenizer, args.prompt_length, anchor=anchor)
 
         all_input_ids = torch.tensor([f.src_ids for f in eval_features], dtype=torch.long)
@@ -601,10 +612,12 @@ def main():
         for batch in tqdm(eval_dataloader, desc="Evaluation"):
             batch = tuple(t.to(device) for t in batch)
             src_ids, attention_mask, trg_ids, block_flag = batch
+            trg_ids_ = trg_ids.clone()
+            trg_ids_[(src_ids == trg_ids)] = -100 ##ignore index = -100
             with torch.no_grad():
                 outputs = model(input_ids=src_ids,
                                 attention_mask=attention_mask,
-                                labels=trg_ids,
+                                labels=trg_ids_,
                                 prompt_mask=block_flag,
                                 apply_prompt=args.apply_prompt)
                 tmp_eval_loss = outputs.loss
@@ -654,6 +667,18 @@ def main():
 
         eval_loss = eval_loss / eval_steps
         p, r, f1, fpr, wpr, tp, fp, fn, wp = Metrics.csc_compute(all_inputs, all_labels, all_predictions)
+
+        if args.response_file:
+            output_file = os.path.join(args.output_dir, args.response_file)
+            with open(output_file, "w") as writer:
+                for input, label, prediction in zip(all_inputs, all_labels, all_predictions):
+                    writer.write("input: " + " ".join(input) + "\t")
+                    writer.write("label: " + " ".join(label) + "\t")
+                    writer.write("prediction: " + " ".join(prediction) + "\t")
+                    if prediction==label:
+                        writer.write("correct\n")
+                    else:
+                        writer.write("wrong\n")
 
         output_tp_file = os.path.join(args.output_dir, "sents.tp")
         with open(output_tp_file, "w") as writer:
